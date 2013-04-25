@@ -28,27 +28,27 @@ import freenet.support.transport.ip.IPUtil;
 
 public class UdpSocketHandler extends PacketTransportPlugin  implements PrioRunnable, PortForwardSensitiveSocketHandler {
 
-	private final DatagramSocket _sock;
+	protected final DatagramSocket _sock;
 	private final InetAddress _bindTo;
-	private final AddressTracker tracker;
-	private IncomingPacketFilter lowLevelFilter;
+	protected final AddressTracker tracker;
+	protected IncomingPacketFilter lowLevelFilter;
 	/** RNG for debugging, used with _dropProbability.
 	 * NOT CRYPTO SAFE. DO NOT USE FOR THINGS THAT NEED CRYPTO SAFE RNG!
 	 */
-	private Random dropRandom;
+	protected Random dropRandom;
 	/** If &gt;0, 1 in _dropProbability chance of dropping a packet; for debugging */
-	private int _dropProbability;
+	protected int _dropProbability;
 	// Icky layer violation, but we need to know the Node to work around the EvilJVMBug.
-	private final Node node;
-        private static volatile boolean logMINOR;
-	private static volatile boolean logDEBUG;
-	private boolean _isDone;
-	private volatile boolean _active = true;
-	private final int listenPort;
+	protected final Node node;
+    protected static volatile boolean logMINOR;
+	protected static volatile boolean logDEBUG;
+	protected boolean _isDone;
+	protected volatile boolean _active = true;
+	protected final int listenPort;
 	private final String title;
-	private boolean _started;
-	private long startTime;
-	private final IOStatisticCollector collector;
+	protected boolean _started;
+	protected long startTime;
+	protected final IOStatisticCollector collector;
 
         static {
             Logger.registerClass(UdpSocketHandler.class);
@@ -141,7 +141,7 @@ public class UdpSocketHandler extends PacketTransportPlugin  implements PrioRunn
 		}
 	}
 
-	private void runLoop() {
+	protected void runLoop() {
 		byte[] buf = new byte[MAX_RECEIVE_SIZE];
 		DatagramPacket packet = new DatagramPacket(buf, buf.length);
 		while (_active) {
@@ -158,7 +158,7 @@ public class UdpSocketHandler extends PacketTransportPlugin  implements PrioRunn
 		}
 	}
 
-	private void realRun(DatagramPacket packet) {
+	protected void realRun(DatagramPacket packet) {
 		// Single receiving thread
 		boolean gotPacket = getPacket(packet);
 		long now = System.currentTimeMillis();
@@ -202,7 +202,7 @@ public class UdpSocketHandler extends PacketTransportPlugin  implements PrioRunn
 
 	private static final int MAX_RECEIVE_SIZE = 1500;
 
-	private boolean getPacket(DatagramPacket packet) {
+	protected boolean getPacket(DatagramPacket packet) {
 		try {
 			_sock.receive(packet);
 			InetAddress address = packet.getAddress();
