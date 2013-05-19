@@ -393,15 +393,15 @@ public class NodeIPDetector {
 	 * Is called by IPAddressDetector to inform NodeIPDetector about the MTU
 	 * associated to this interface
 	 */
-        public void reportMTU(int mtu, boolean forIPv6) {
+    public void reportMTU(int mtu, boolean forIPv6) {
 	    boolean mtuChanged = false;
 	    if(forIPv6)
-		mtuChanged |= minimumMTUIPv6.report(mtu);
+            mtuChanged |= minimumMTUIPv6.report(mtu);
 	    else	
-		mtuChanged |= minimumMTUIPv4.report(mtu);
+            mtuChanged |= minimumMTUIPv4.report(mtu);
 
 	    if (mtuChanged) node.updateMTU();
-        }
+    }
 
 	public void redetectAddress() {
 		FreenetInetAddress[] newIP = detectPrimaryIPAddress(false);
