@@ -1082,7 +1082,7 @@ public class Node implements TimeSkewDetectorCallback {
 					Thread.sleep(100);
 				} catch (InterruptedException e) {
 				}
-				if(isPRNGReady)
+				if(isPRNGReady || 1==1) //hack just to make debug fast
 					return;
 				System.out.println("Not enough entropy available.");
 				System.out.println("Trying to gather entropy (randomness) by reading the disk...");
