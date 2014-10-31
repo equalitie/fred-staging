@@ -34,7 +34,9 @@ import freenet.support.transport.ip.HostnameSyntaxException;
 import freenet.support.transport.ip.IPUtil;
 
 import freenet.io.comm.UdpSocketHandler; //Parent class
-import org.apache.commons.codec.binary.Base64; //To use in encoding
+//import org.apache.commons.codec.binary.Base64; //To use in encoding
+import freenet.support.Base64;
+import freenet.support.IllegalBase64Exception;
 
 public class UdpBase64SocketHandler extends UdpSocketHandler {
 
@@ -272,14 +274,21 @@ public class UdpBase64SocketHandler extends UdpSocketHandler {
         node.executor.execute(this, "UdpBase64SocketHandler for port "+listenPort);
     }
 
-    private void Base64ToBin(byte[] data)
+    private byte[] Base64ToBin(byte[] data)
     {
-        data = Base64.encodeBase64(data);
+        return Base64.encodeStandard(data).getBytes();
     }
-    
-    private void BinToBase64(byte[] data)
+
+    private static final byte[] EMPTY_PACKET = {};
+    private byte[] BinToBase64(byte[] data)
     {
-        data = Base64.decodeBase64(data);
+        try {
+            return Base64.decodeStandard(new String(data)); //we probably need to indicate the encoding
+        } catch (IllegalBase64Exception e)
+            {
+                Logger.warning(this, "Dropping corrupted Based64 packet:" + new String(data));                
+                return EMPTY_PACKET;
+            }
     }
 
 }
