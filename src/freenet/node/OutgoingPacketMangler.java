@@ -22,6 +22,11 @@ public interface OutgoingPacketMangler extends OutgoingMangler {
 	public int fullHeadersLengthOneMessage();
 
 	/**
+	 * List of supported negotiation types in preference order (best last)
+	 */
+	public int[] supportedNegTypes(boolean forPublic);
+
+	/**
 	 * The SocketHandler we are connected to.
 	 */
 	public SocketHandler getSocketHandler();

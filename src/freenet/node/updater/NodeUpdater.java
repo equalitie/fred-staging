@@ -1,5 +1,8 @@
 package freenet.node.updater;
 
+import static java.util.concurrent.TimeUnit.HOURS;
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -36,6 +39,8 @@ import freenet.support.Ticker;
 import freenet.support.api.Bucket;
 import freenet.support.io.Closer;
 import freenet.support.io.FileBucket;
+import freenet.support.io.FileUtil;
+import freenet.support.io.NullOutputStream;
 
 public abstract class NodeUpdater implements ClientGetCallback, USKCallback, RequestClient {
 
@@ -97,7 +102,7 @@ public abstract class NodeUpdater implements ClientGetCallback, USKCallback, Req
 	
 	protected void maybeProcessOldBlob() {
 		File oldBlob = getBlobFile(currentVersion);
-		if(oldBlob != null) {
+		if(oldBlob.exists()) {
 			File temp;
 			try {
 				temp = File.createTempFile(blobFilenamePrefix + availableVersion + "-", ".fblob.tmp", manager.node.clientCore.getPersistentTempDir());
@@ -159,7 +164,7 @@ public abstract class NodeUpdater implements ClientGetCallback, USKCallback, Req
 			public void run() {
 				maybeUpdate();
 			}
-		}, 60 * 1000); // leave some time in case we get later editions
+		}, SECONDS.toMillis(60)); // leave some time in case we get later editions
 		// LOCKING: Always take the NodeUpdater lock *BEFORE* the NodeUpdateManager lock
 		if(found <= currentVersion) {
 			System.err.println("Cancelling fetch for "+found+": not newer than current version "+currentVersion);
@@ -239,7 +244,7 @@ public abstract class NodeUpdater implements ClientGetCallback, USKCallback, Req
 			cancelled.cancel(null, core.clientContext);
 	}
 
-	File getBlobFile(int availableVersion) {
+	final File getBlobFile(int availableVersion) {
 		return new File(node.clientCore.getPersistentTempDir(), blobFilenamePrefix + availableVersion + ".fblob");
 	}
 	Bucket getBlobBucket(int availableVersion) {
@@ -358,6 +363,15 @@ public abstract class NodeUpdater implements ClientGetCallback, USKCallback, Req
 	
 	static final String DEPENDENCIES_FILE = "dependencies.properties";
 	
+	/** Read the jar file. Parse the Properties. Read every file in the ZIP; if it is corrupted,
+	 * we will get a CRC error and therefore an IOException, and so the update won't be deployed.
+	 * This is not entirely foolproof because ZipInputStream doesn't check the CRC for stored 
+	 * files, only for deflated files, and it's only a CRC32 anyway. But it should reduce the
+	 * chances of accidental corruption breaking an update.
+	 * @param is The InputStream for the jar file.
+	 * @param filename The filename of the manifest file containing the properties (normally 
+	 * META-INF/MANIFEST.MF). 
+	 * @throws IOException If there is a temporary files error or the jar is corrupted. */
 	static Properties parseProperties(InputStream is, String filename) throws IOException {
 		Properties props = new Properties();
 		ZipInputStream zis = new ZipInputStream(is);
@@ -383,6 +397,11 @@ public abstract class NodeUpdater implements ClientGetCallback, USKCallback, Req
 					ByteArrayInputStream bais = new ByteArrayInputStream(buf);
 					props.load(bais);
 				} else {
+				    // Read the file. Throw if there is a CRC error.
+				    // Note that java.util.zip.ZipInputStream only checks the CRC for compressed 
+				    // files, so this is not entirely foolproof.
+				    long size = ze.getSize();
+				    FileUtil.copy(zis, new NullOutputStream(), size);
 					zis.closeEntry();
 				}
 			}
@@ -453,7 +472,7 @@ public abstract class NodeUpdater implements ClientGetCallback, USKCallback, Req
 					public void run() {
 						maybeUpdate();
 					}
-				}, 60 * 60 * 1000);
+				}, HOURS.toMillis(1));
 		}
 	}
 

@@ -3,10 +3,13 @@
  * http://www.gnu.org/ for further details of the GPL. */
 package freenet.support.io;
 
+import static java.util.concurrent.TimeUnit.MINUTES;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.ref.WeakReference;
+import java.security.SecureRandom;
 import java.util.LinkedList;
 import java.util.ListIterator;
 import java.util.Queue;
@@ -15,7 +18,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import com.db4o.ObjectContainer;
 
+import freenet.crypt.AEADCryptBucket;
 import freenet.crypt.RandomSource;
+import freenet.node.NodeStarter;
 import freenet.support.Executor;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
@@ -61,7 +66,7 @@ public class TempBucketFactory implements BucketFactory {
 	private long maxRamUsed;
 
 	/** How old is a long-lived RAMBucket? */
-	private final static int RAMBUCKET_MAX_AGE = 5*60*1000; // 5mins
+	private final static long RAMBUCKET_MAX_AGE = MINUTES.toMillis(5);
 	/** How many times the maxRAMBucketSize can a RAMBucket be before it gets migrated? */
 	final static int RAMBUCKET_CONVERSION_FACTOR = 4;
 	
@@ -205,7 +210,9 @@ public class TempBucketFactory implements BucketFactory {
 			}
 			
 			private void _maybeMigrateRamBucket(long futureSize) throws IOException {
-				if(closed) throw new IOException("Already closed");
+				if (closed) {
+					return;
+				}
 				if(isRAMBucket()) {
 					boolean shouldMigrate = false;
 					boolean isOversized = false;
@@ -450,6 +457,8 @@ public class TempBucketFactory implements BucketFactory {
 			if (!hasBeenFreed) {
 				if (TRACE_BUCKET_LEAKS)
 					Logger.error(this, "TempBucket not freed, size=" + size() + ", isRAMBucket=" + isRAMBucket()+" : "+this, tracer);
+				else
+				    Logger.error(this, "TempBucket not freed, size=" + size() + ", isRAMBucket=" + isRAMBucket()+" : "+this);
 				free();
 			}
                         super.finalize();
@@ -642,6 +651,13 @@ public class TempBucketFactory implements BucketFactory {
 	private Bucket _makeFileBucket() {
 		Bucket fileBucket = new TempFileBucket(filenameGenerator.makeRandomFilename(), filenameGenerator, true);
 		// Do we want it to be encrypted?
-		return (reallyEncrypt ? new PaddedEphemerallyEncryptedBucket(fileBucket, 1024, strongPRNG, weakPRNG) : fileBucket);
+		if(reallyEncrypt) {
+            fileBucket = new TrivialPaddedBucket(fileBucket);
+		    byte[] key = new byte[16];
+		    SecureRandom srng = NodeStarter.getGlobalSecureRandom();
+		    srng.nextBytes(key);
+		    fileBucket = new AEADCryptBucket(fileBucket, key);
+		}
+		return fileBucket;
 	}
 }

@@ -41,7 +41,6 @@ import freenet.keys.FreenetURI;
 import freenet.keys.USK;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
-import freenet.support.OOMHandler;
 import freenet.support.Logger.LogLevel;
 import freenet.support.api.Bucket;
 import freenet.support.compress.Compressor;
@@ -116,6 +115,7 @@ public class SingleFileFetcher extends SimpleSingleFileFetcher {
 			// Always copy if persistent
 			this.metaStrings = new ArrayList<String>(metaStrings);
 		this.addedMetaStrings = addedMetaStrings;
+		if(logMINOR) Logger.minor(this, "Metadata: "+metadata);
 		this.clientMetadata = (metadata != null ? metadata.clone() : new ClientMetadata());
 		if(hasInitialMetadata)
 			thisKey = FreenetURI.EMPTY_CHK_URI.clone();
@@ -788,8 +788,10 @@ public class SingleFileFetcher extends SimpleSingleFileFetcher {
 				if(logMINOR) Logger.minor(this, "Is single-file redirect");
 				clientMetadata.mergeNoOverwrite(metadata.getClientMetadata()); // even splitfiles can have mime types!
 				if(persistent) container.store(clientMetadata);
-				if(clientMetadata != null && !clientMetadata.isTrivial()) 
+				if(clientMetadata != null && !clientMetadata.isTrivial()) { 
 					rcb.onExpectedMIME(clientMetadata, container, context);
+					if(logMINOR) Logger.minor(this, "MIME type is "+clientMetadata);
+				}
 
 				String mimeType = clientMetadata.getMIMETypeNoParams();
 				if(mimeType != null && ArchiveManager.ARCHIVE_TYPE.isUsableArchiveType(mimeType) && metaStrings.size() > 0) {
@@ -1095,11 +1097,6 @@ public class SingleFileFetcher extends SimpleSingleFileFetcher {
 				output.close(); output = null;
 				pipeOut.close(); pipeOut = null;
 				pipeIn.close(); pipeIn = null;
-			} catch (OutOfMemoryError e) {
-				OOMHandler.handleOOM(e);
-				System.err.println("Failing above attempted fetch...");
-				onFailure(new FetchException(FetchException.INTERNAL_ERROR, e), state, container, context);
-				return;
 			} catch (Throwable t) {
 				Logger.error(this, "Caught "+t, t);
 				onFailure(new FetchException(FetchException.INTERNAL_ERROR, t), state, container, context);
@@ -1330,11 +1327,6 @@ public class SingleFileFetcher extends SimpleSingleFileFetcher {
 					worker.waitFinished();
 				} else streamGenerator.writeTo(output, container, context);
 
-			} catch (OutOfMemoryError e) {
-				OOMHandler.handleOOM(e);
-				System.err.println("Failing above attempted fetch...");
-				onFailure(new FetchException(FetchException.INTERNAL_ERROR, e), state, container, context);
-				return;
 			} catch (Throwable t) {
 				Logger.error(this, "Caught "+t, t);
 				onFailure(new FetchException(FetchException.INTERNAL_ERROR, t), state, container, context);

@@ -5,6 +5,7 @@ package freenet.client;
 
 import com.db4o.ObjectContainer;
 
+import freenet.client.filter.DataFilterException;
 import freenet.keys.FreenetURI;
 import freenet.l10n.NodeL10n;
 import freenet.support.Logger;
@@ -198,6 +199,21 @@ public class FetchException extends Exception implements Cloneable {
 			Logger.minor(this, "FetchException("+getMessage(mode)+ ')', this);
 	}
 
+	public FetchException(long expectedSize, DataFilterException t, String expectedMimeType) {
+		super(getMessage(CONTENT_VALIDATION_FAILED)+" "+NodeL10n.getBase().getString("FetchException.unsafeContentDetails")+" "+t.getMessage());
+		extraMessage = t.getMessage();
+		this.mode = CONTENT_VALIDATION_FAILED;
+		this.expectedSize = expectedSize;
+		this.expectedMimeType = expectedMimeType;
+		errorCodes = null;
+		initCause(t);
+		newURI = null;
+		if(mode == INTERNAL_ERROR)
+			Logger.error(this, "Internal error: "+this);
+		else if(logMINOR) 
+			Logger.minor(this, "FetchException("+getMessage(mode)+ ')', this);
+	}
+
 	public FetchException(int mode, long expectedSize, Throwable t, String expectedMimeType) {
 		super(getMessage(mode)+": "+t.getMessage());
 		if(mode == 0)
@@ -347,7 +363,7 @@ public class FetchException extends Exception implements Cloneable {
 	public String toString() {
 		StringBuilder sb = new StringBuilder(200);
 		sb.append("FetchException:");
-		sb.append(getShortMessage(mode));
+		sb.append(getMessage(mode));
 		sb.append(':');
 		sb.append(newURI);
 		sb.append(':');
@@ -363,6 +379,13 @@ public class FetchException extends Exception implements Cloneable {
 		return sb.toString();
 	}
 	
+	public String toUserFriendlyString() {
+		if(extraMessage == null)
+			return getShortMessage(mode);
+		else
+			return getShortMessage(mode) + " : " + extraMessage;
+	}
+
 	/** Get the (localised) long explanation for this failure mode. */
 	public static String getMessage(int mode) {
 		String ret = NodeL10n.getBase().getString("FetchException.longError."+mode);

@@ -218,13 +218,13 @@ public class DarknetConnectionsToadlet extends ConnectionsToadlet {
 			for(DarknetPeerNode pn : peerNodes) {
 				if (request.isPartSet("node_"+pn.hashCode())) {
 					String peer_name = pn.getName();
-					String peer_hash = "" + pn.hashCode();
+					String peer_hash = String.valueOf(pn.hashCode());
 					if(!peers.containsKey(peer_hash)) {
 						peers.put(peer_hash, peer_name);
 					}
 				}
 			}
-			N2NTMToadlet.createN2NTMSendForm( pageNode, ctx.getContainer().isAdvancedModeEnabled(), contentNode, ctx, peers);
+			N2NTMToadlet.createN2NTMSendForm( pageNode, ctx.isAdvancedModeEnabled(), contentNode, ctx, peers);
 			writeHTMLReply(ctx, 200, "OK", pageNode.generate());
 			return;
 		} else if (request.isPartSet("doAction") && request.getPartAsStringFailsafe("action",25).equals("update_notes")) {

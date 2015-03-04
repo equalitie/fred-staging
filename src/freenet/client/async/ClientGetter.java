@@ -29,14 +29,13 @@ import freenet.client.events.SendingToNetworkEvent;
 import freenet.client.events.SplitfileCompatibilityModeEvent;
 import freenet.client.events.SplitfileProgressEvent;
 import freenet.client.filter.ContentFilter;
-import freenet.client.filter.MIMEType;
+import freenet.client.filter.FilterMIMEType;
 import freenet.client.filter.UnsafeContentTypeException;
 import freenet.crypt.HashResult;
 import freenet.keys.ClientKeyBlock;
 import freenet.keys.FreenetURI;
 import freenet.node.RequestClient;
 import freenet.support.Logger;
-import freenet.support.OOMHandler;
 import freenet.support.api.Bucket;
 import freenet.support.compress.CompressionOutputSizeException;
 import freenet.support.compress.Compressor;
@@ -274,10 +273,15 @@ public class ClientGetter extends BaseClientGetter implements WantsCooldownCallb
 			container.activate(ctx, 1);
 		
 		if(forceCompatibleExtension != null && ctx.filterData) {
+		    if(mimeType == null) {
+		        onFailure(new FetchException(FetchException.MIME_INCOMPATIBLE_WITH_EXTENSION, "No MIME type but need specific extension \""+forceCompatibleExtension+"\""), null, container, context);
+		        return;
+		    }
 			try {
 				checkCompatibleExtension(mimeType);
 			} catch (FetchException e) {
 				onFailure(e, null, container, context);
+				return;
 			}
 		}
 
@@ -359,13 +363,9 @@ public class ClientGetter extends BaseClientGetter implements WantsCooldownCallb
 				clientMetadata = worker.getClientMetadata();
 				result = new FetchResult(clientMetadata, finalResult);
 			}
-		} catch (OutOfMemoryError e) {
-			OOMHandler.handleOOM(e);
-			System.err.println("Failing above attempted fetch...");
-			ex = new FetchException(FetchException.INTERNAL_ERROR, e);
 		} catch(UnsafeContentTypeException e) {
 			Logger.normal(this, "Error filtering content: will not validate", e);
-			ex = new FetchException(e.getFetchErrorCode(), expectedSize, e, ctx.overrideMIME != null ? ctx.overrideMIME : expectedMIME);
+			ex = e.createFetchException(ctx.overrideMIME != null ? ctx.overrideMIME : expectedMIME, expectedSize);
 			/*Not really the state's fault*/
 		} catch(URISyntaxException e) {
 			//Impossible
@@ -447,8 +447,9 @@ public class ClientGetter extends BaseClientGetter implements WantsCooldownCallb
 				if(mime != null && !"".equals(mime)) {
 					// Even if it's the default, it is set because we have the final size.
 					UnsafeContentTypeException unsafe = ContentFilter.checkMIMEType(mime);
-					if(unsafe != null)
-						e = new FetchException(unsafe.getFetchErrorCode(), e.expectedSize, unsafe, mime);
+					if(unsafe != null) {
+						e = unsafe.recreateFetchException(e, mime);
+					}
 				}
 			}
 		}
@@ -729,7 +730,7 @@ public class ClientGetter extends BaseClientGetter implements WantsCooldownCallb
 		if(ctx.filterData) {
 			UnsafeContentTypeException e = ContentFilter.checkMIMEType(mime);
 			if(e != null) {
-				throw new FetchException(e.getFetchErrorCode(), expectedSize, e, mime);
+				throw e.createFetchException(mime, expectedSize);
 			}
 			if(forceCompatibleExtension != null)
 				checkCompatibleExtension(mime);
@@ -745,7 +746,7 @@ public class ClientGetter extends BaseClientGetter implements WantsCooldownCallb
 	}
 
 	private void checkCompatibleExtension(String mimeType) throws FetchException {
-		MIMEType type = ContentFilter.getMIMEType(mimeType);
+		FilterMIMEType type = ContentFilter.getMIMEType(mimeType);
 		if(type == null)
 			// Not our problem, will be picked up elsewhere.
 			return;

@@ -1,9 +1,13 @@
 package freenet.node;
 
+import static java.util.concurrent.TimeUnit.HOURS;
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import freenet.io.comm.PeerParseException;
 import freenet.io.comm.ReferenceSignatureVerificationException;
 import freenet.node.OpennetManager.ConnectionType;
 import freenet.node.TransportManager.TransportMode;
+import freenet.node.OpennetManager.LinkLengthClass;
 import freenet.node.updater.NodeUpdateManager;
 import freenet.node.updater.UpdateOverMandatoryManager;
 import freenet.support.Logger;
@@ -119,8 +123,8 @@ public class OpennetPeerNode extends PeerNode {
 	}
 	
 	@Override
-	public synchronized SimpleFieldSet exportMetadataFieldSet() {
-		SimpleFieldSet fs = super.exportMetadataFieldSet();
+	public synchronized SimpleFieldSet exportMetadataFieldSet(long now) {
+		SimpleFieldSet fs = super.exportMetadataFieldSet(now);
 		fs.put("timeLastSuccess", timeLastSuccess);
 		return fs;
 	}
@@ -175,21 +179,21 @@ public class OpennetPeerNode extends PeerNode {
 	 * is in progress, but otherwise we should disconnect. */
 	private boolean shouldDisconnectTooOld() {
 		long uptime = System.currentTimeMillis() - timeLastConnectionCompleted();
-		if(uptime < 30*1000)
+		if(uptime < SECONDS.toMillis(30))
 			// Allow 30 seconds to send the UOM request.
 			return false;
 		// FIXME remove, paranoia
-		if(uptime < 60*60*1000)
+		if(uptime < HOURS.toMillis(1))
 			return false;
 		NodeUpdateManager updater = node.nodeUpdater;
 		if(updater == null) return true; // Not going to UOM.
 		UpdateOverMandatoryManager uom = updater.uom;
 		if(uom == null) return true; // Not going to UOM
-		if(uptime > 2*60*60*1000) {
+		if(uptime > HOURS.toMillis(2)) {
 			// UOM transfers can take ages, but there has to be some limit...
 			return true;
 		}
-		if(timeSinceSentUOM() < 60*1000) {
+		if(timeSinceSentUOM() < SECONDS.toMillis(60)) {
 			// Let it finish.
 			// 60 seconds extra to ensure it has time to parse the jar and start fetching dependencies.
 			return false;
@@ -200,7 +204,7 @@ public class OpennetPeerNode extends PeerNode {
 	@Override
 	protected void onConnect() {
 		super.onConnect();
-		opennet.crypto.socket.getAddressTracker().setPresumedGuiltyAt(System.currentTimeMillis()+60*60*1000);
+		opennet.crypto.socket.getAddressTracker().setPresumedGuiltyAt(System.currentTimeMillis() + HOURS.toMillis(1));
 	}
 	
 	private boolean wasDropped;
@@ -273,6 +277,18 @@ public class OpennetPeerNode extends PeerNode {
 	boolean dontKeepFullFieldSet() {
 		return true;
 	}
+	
+    public LinkLengthClass linkLengthClass() {
+        if(!Location.isValid(getLocation())) {
+            Logger.error(this, "No location on "+this, new Exception("debug"));
+            return LinkLengthClass.SHORT; // FIXME add unknown to enum? Would need more complex error handling...
+        }
+        // FIXME OPTIMISE This should not change since we don't swap on opennet.
+        if(Location.distance(this, opennet.node.getLocation()) > OpennetManager.LONG_DISTANCE)
+            return LinkLengthClass.LONG;
+        else
+            return LinkLengthClass.SHORT;
+    }
 
 	@Override
 	public TransportMode getMode() {

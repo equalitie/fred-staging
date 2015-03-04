@@ -1,15 +1,11 @@
 package freenet.pluginmanager;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 
-import com.db4o.ObjectContainer;
-import com.db4o.ObjectSet;
-
 import freenet.client.HighLevelSimpleClient;
-import freenet.client.async.ClientContext;
-import freenet.client.async.DBJob;
 import freenet.client.async.DatabaseDisabledException;
 import freenet.client.filter.FilterCallback;
 import freenet.clients.http.PageMaker;
@@ -17,10 +13,10 @@ import freenet.clients.http.SessionManager;
 import freenet.clients.http.ToadletContainer;
 import freenet.config.SubConfig;
 import freenet.node.Node;
+import freenet.node.NodeClientCore;
 import freenet.node.RequestStarter;
 import freenet.support.HTMLNode;
 import freenet.support.URIPreEncoder;
-import freenet.support.io.NativeThread;
 
 public class PluginRespirator {
 	private static final ArrayList<SessionManager> sessionManagers = new ArrayList<SessionManager>(4);
@@ -32,6 +28,7 @@ public class PluginRespirator {
 	private final Node node;
 	private final FredPlugin plugin;
 	private final PluginInfoWrapper pi;
+	private final PluginStores stores;
 
 	private PluginStore store;
 	
@@ -40,6 +37,7 @@ public class PluginRespirator {
 		this.hlsc = node.clientCore.makeClient(RequestStarter.INTERACTIVE_PRIORITY_CLASS, false, false);
 		this.plugin = pi.getPlugin();
 		this.pi = pi;
+		stores = node.clientCore.getPluginStores();
 	}
 	
 	//public HighLevelSimpleClient getHLSimpleClient() throws PluginSecurityException {
@@ -73,7 +71,15 @@ public class PluginRespirator {
 		return container.getPageMaker();
 	}
 	
-	/** Add a valid form including the form password. 
+	/**
+	 * Add a valid form including the {@link NodeClientCore#formPassword}. See the JavaDoc there for an explanation of the purpose of this mechanism. 
+	 * 
+	 * <p><b>ATTENTION</b>: It is critically important to validate the form password when processing requests which "change the server state".
+	 * Other words for this would be requests which change your database or "write" requests.
+	 * Requests which only read values from the server don't have to validate the form password.</p>
+	 * 
+	 * <p>To validate that the right password was received, use {@link WebInterfaceToadlet#isFormPassword(HTTPRequest)}.</p> 
+	 * 
 	 * @param parentNode The parent HTMLNode.
 	 * @param target Where to post to.
 	 * @param name The id/name of the form.
@@ -99,8 +105,8 @@ public class PluginRespirator {
 	public ToadletContainer getToadletContainer() {
 		return node.clientCore.getToadletContainer();
 	}
-
-	/**
+	
+    /**
 	 * Get a PluginStore that can be used by the plugin to put data in a database.
 	 * The database used is the node's database, so all the encrypt/decrypt part
 	 * is already automatically handled according to the physical security level.
@@ -109,26 +115,13 @@ public class PluginRespirator {
 	 * @throws DatabaseDisabledException
 	 */
 	public PluginStore getStore() throws DatabaseDisabledException {
-		final PluginStoreContainer example = new PluginStoreContainer();
-		example.nodeDBHandle = this.node.nodeDBHandle;
-		example.storeIdentifier = this.plugin.getClass().getCanonicalName();
-		example.pluginStore = null;
-
-		this.node.clientCore.runBlocking(new DBJob() {
-
-			@Override
-			public boolean run(ObjectContainer container, ClientContext context) {
-				ObjectSet<PluginStoreContainer> stores = container.queryByExample(example);
-				if(stores.size() == 0) store = new PluginStore();
-				else {
-					store = stores.get(0).pluginStore;
-					container.activate(store, Integer.MAX_VALUE);
-				}
-				return false;
-			}
-		}, NativeThread.HIGH_PRIORITY);
-
-		return this.store;
+	    synchronized(this) {
+	        if(store != null) return store;
+	        store = stores.loadPluginStore(this.plugin.getClass().getCanonicalName());
+	        if(store == null)
+	            store = new PluginStore();
+	        return store;
+	    }
 	}
 
 	/**
@@ -139,31 +132,13 @@ public class PluginRespirator {
 	 * @throws DatabaseDisabledException
 	 */
 	public void putStore(final PluginStore store) throws DatabaseDisabledException {
-		final PluginStoreContainer storeC = new PluginStoreContainer();
-		storeC.nodeDBHandle = this.node.nodeDBHandle;
-		storeC.pluginStore = null;
-		storeC.storeIdentifier = this.plugin.getClass().getCanonicalName();
-
-		this.node.clientCore.queue(new DBJob() {
-
-			@Override
-			public boolean run(ObjectContainer container, ClientContext context) {
-				// cascadeOnDelete(true) will make the calls to store() delete
-				// any precedent stored instance of PluginStore.
-
-				if(container.queryByExample(storeC).size() == 0) {
-					// Let's store the whole container.
-					storeC.pluginStore = store;
-					container.ext().store(storeC, Integer.MAX_VALUE);
-				} else {
-					// Only update the PluginStore.
-					// Check all subStores for changes, not only the top-level store.
-					storeC.pluginStore = store;
-					container.ext().store(storeC.pluginStore, Integer.MAX_VALUE);
-				}
-				return true;
-			}
-		}, NativeThread.NORM_PRIORITY, false);
+	    String name = this.plugin.getClass().getCanonicalName();
+	    try {
+            stores.writePluginStore(name, store);
+        } catch (IOException e) {
+            System.err.println("Unable to write plugin data for "+name+" : "+e);
+            return;
+        }
 	}
 
 	/**

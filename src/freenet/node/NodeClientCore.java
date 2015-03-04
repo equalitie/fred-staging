@@ -1,10 +1,13 @@
 package freenet.node;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.concurrent.CountDownLatch;
 
 import org.tanukisoftware.wrapper.WrapperManager;
 
@@ -36,6 +39,7 @@ import freenet.client.filter.GenericReadFilterCallback;
 import freenet.client.filter.LinkFilterExceptionProvider;
 import freenet.clients.http.FProxyToadlet;
 import freenet.clients.http.SimpleToadletServer;
+import freenet.clients.http.bookmark.BookmarkManager;
 import freenet.config.Config;
 import freenet.config.InvalidConfigValueException;
 import freenet.config.NodeNeedRestartException;
@@ -64,21 +68,20 @@ import freenet.node.fcp.FCPServer;
 import freenet.node.useralerts.SimpleUserAlert;
 import freenet.node.useralerts.UserAlert;
 import freenet.node.useralerts.UserAlertManager;
+import freenet.pluginmanager.PluginRespirator;
+import freenet.pluginmanager.PluginStores;
 import freenet.store.KeyCollisionException;
 import freenet.support.Base64;
 import freenet.support.Executor;
 import freenet.support.ExecutorIdleCallback;
-import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.MutableBoolean;
-import freenet.support.OOMHandler;
-import freenet.support.OOMHook;
 import freenet.support.PrioritizedSerialExecutor;
 import freenet.support.SimpleFieldSet;
-import freenet.support.Ticker;
-import freenet.support.Logger.LogLevel;
 import freenet.support.SizeUtil;
+import freenet.support.Ticker;
 import freenet.support.api.BooleanCallback;
+import freenet.support.api.HTTPRequest;
 import freenet.support.api.IntCallback;
 import freenet.support.api.LongCallback;
 import freenet.support.api.StringArrCallback;
@@ -89,21 +92,16 @@ import freenet.support.io.FilenameGenerator;
 import freenet.support.io.NativeThread;
 import freenet.support.io.PersistentTempBucketFactory;
 import freenet.support.io.TempBucketFactory;
-import freenet.support.math.MersenneTwister;
+import freenet.support.plugins.helpers1.WebInterfaceToadlet;
 
 /**
  * The connection between the node and the client layer.
  */
-public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, ExecutorIdleCallback {
+public class NodeClientCore implements Persistable, DBJobRunner, ExecutorIdleCallback {
 	private static volatile boolean logMINOR;
 
 	static {
-		Logger.registerLogThresholdCallback(new LogThresholdCallback() {
-			@Override
-			public void shouldUpdate() {
-				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
-			}
-		});
+		Logger.registerClass(NodeClientCore.class);
 	}
 
 	public final PersistentStatsPutter bandwidthStatsPutter;
@@ -112,8 +110,23 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 	public final RequestStarterGroup requestStarters;
 	private final HealingQueue healingQueue;
 	public NodeRestartJobsQueue restartJobsQueue;
-	/** Must be included as a hidden field in order for any dangerous HTTP operation to complete successfully. */
+	
+	/**
+	 * <p>Must be included as a hidden field in order for any dangerous HTTP operation to complete successfully.</p>
+	 * <p>The name of the variable is badly chosen: formPassword is an <a href="https://www.owasp.org/index.php/Cross-Site_Request_Forgery_%28CSRF%29">
+	 * anti-CSRF token</a>. As for when to use one, two rules:</p>
+	 * <p>1) if you're changing server side state, you need a POST request</p>
+	 * <p>2) all POST requests need an anti-CSRF token (the exception being a login page, where credentials -that are unpredictable to an attacker-
+	 * are exchanged).</p>
+	 * <p>In practice this means that you must use POST whenever the request can change anything such as your database contents. Other words for this would
+	 * be requests which change your database or "write" requests. Read-only requests can be GET.
+	 * When processing the POST-request, you MUST validate that the received password matches this variable. If it does not, you must NOT process the request.
+	 * In particular, you must NOT modify anything.</p>
+	 * <p>To produce a form which already contains the password, use {@link PluginRespirator#addFormChild(freenet.support.HTMLNode, String, String)}.</p>
+	 * <p>To validate that the right password was received, use {@link WebInterfaceToadlet#isFormPassword(HTTPRequest)}.</p> 
+	 */
 	public final String formPassword;
+	
 	final ProgramDirectory downloadsDir;
 	private File[] downloadAllowedDirs;
 	private boolean includeDownloadDir;
@@ -167,18 +180,20 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 	private UserAlert startingUpAlert;
 	private RestartDBJob[] startupDatabaseJobs;
 	private boolean alwaysCommit;
+	private final PluginStores pluginStores;
 
 	NodeClientCore(Node node, Config config, SubConfig nodeConfig, SubConfig installConfig, int portNumber, int sortOrder, SimpleFieldSet oldConfig, SubConfig fproxyConfig, SimpleToadletServer toadlets, long nodeDBHandle, ObjectContainer container) throws NodeInitException {
 		this.node = node;
 		this.tracker = node.tracker;
 		this.nodeStats = node.nodeStats;
 		this.random = node.random;
+		this.pluginStores = new PluginStores(node, installConfig);
 		killedDatabase = container == null;
 		if(killedDatabase)
 			System.err.println("Database corrupted (before entering NodeClientCore)!");
 		fecQueue = initFECQueue(node.nodeDBHandle, container, null);
 		this.backgroundBlockEncoder = new BackgroundBlockEncoder();
-		clientDatabaseExecutor = new PrioritizedSerialExecutor(NativeThread.NORM_PRIORITY, NativeThread.MAX_PRIORITY+1, NativeThread.NORM_PRIORITY, true, 30*1000, this, node.nodeStats);
+		clientDatabaseExecutor = new PrioritizedSerialExecutor(NativeThread.NORM_PRIORITY, NativeThread.MAX_PRIORITY+1, NativeThread.NORM_PRIORITY, true, SECONDS.toMillis(30), this, node.nodeStats);
 		storeChecker = new DatastoreChecker(node);
 		byte[] pwdBuf = new byte[16];
 		random.nextBytes(pwdBuf);
@@ -207,7 +222,7 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 		if(oldTemp.exists() && oldTemp.isDirectory() && !FileUtil.equals(tempDir.dir, oldTemp)) {
 			System.err.println("Deleting old temporary dir: "+oldTemp);
 			try {
-				FileUtil.secureDeleteAll(oldTemp, new MersenneTwister(random.nextLong()));
+				FileUtil.secureDeleteAll(oldTemp);
 			} catch (IOException e) {
 				// Ignore.
 			}
@@ -256,26 +271,21 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 			}
 		});
 
-		this.persistentTempDir = node.setupProgramDir(installConfig, "persistentTempDir", node.userDir().file("persistent-temp-"+portNumber).toString(),
+		this.persistentTempDir = node.setupProgramDir(installConfig, "persistentTempDir", node.userDir().file("persistent-temp").toString(),
 		  "NodeClientCore.persistentTempDir", "NodeClientCore.persistentTempDirLong", nodeConfig);
 		initPTBF(container, nodeConfig);
 
 		// Allocate 10% of the RAM to the RAMBucketPool by default
 		int defaultRamBucketPoolSize;
-		long maxMemory = Runtime.getRuntime().maxMemory();
-		if(maxMemory == Long.MAX_VALUE || maxMemory <= 0)
+		long maxMemory = NodeStarter.getMemoryLimitMB();
+		if(maxMemory < 0)
 			defaultRamBucketPoolSize = 10;
 		else {
-			maxMemory /= (1024 * 1024);
-			if(maxMemory <= 0) // Still bogus
-				defaultRamBucketPoolSize = 10;
-			else {
-				// 10% of memory above 64MB, with a minimum of 1MB.
-				defaultRamBucketPoolSize = Math.min(Integer.MAX_VALUE, (int)((maxMemory - 64) / 10));
-				if(defaultRamBucketPoolSize <= 0) defaultRamBucketPoolSize = 1;
-			}
+			// 10% of memory above 64MB, with a minimum of 1MB.
+			defaultRamBucketPoolSize = (int)Math.min(Integer.MAX_VALUE, ((maxMemory - 64) / 10));
+			if(defaultRamBucketPoolSize <= 0) defaultRamBucketPoolSize = 1;
 		}
-
+		
 		// Max bucket size 5% of the total, minimum 32KB (one block, vast majority of buckets)
 		long maxBucketSize = Math.max(32768, (defaultRamBucketPoolSize * 1024 * 1024) / 20);
 
@@ -345,6 +355,8 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 		
 		clientContext.init(requestStarters, alerts);
 		initKeys(container);
+		if(container != null)
+		    migratePluginStores(container);
 
 		node.securityLevels.addPhysicalThreatLevelListener(new SecurityLevelListener<PHYSICAL_THREAT_LEVEL>() {
 
@@ -501,11 +513,10 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 
 		});
 		toadletContainer = toadlets;
-		toadletContainer.setCore(this);
 		toadletContainer.setBucketFactory(tempBucketFactory);
 		if(fecQueue == null) throw new NullPointerException();
 		fecQueue.init(RequestStarter.NUMBER_OF_PRIORITY_CLASSES, FEC_QUEUE_CACHE_SIZE, clientContext.jobRunner, node.executor, clientContext);
-		OOMHandler.addOOMHook(this);
+		
 		if(killedDatabase)
 			System.err.println("Database corrupted (leaving NodeClientCore)!");
 
@@ -657,6 +668,7 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 		requestStarters.lateStart(this, nodeDBHandle, container);
 		// Must create the CRSCore's before telling them to load stuff.
 		initKeys(container);
+		migratePluginStores(container);
 		if(!killedDatabase)
 			fcpServer.load(container);
 		synchronized(this) {
@@ -703,7 +715,22 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 		return true;
 	}
 
-	private void lateInitFECQueue(long nodeDBHandle, ObjectContainer container) {
+	private void migratePluginStores(ObjectContainer container) {
+	    try {
+	        pluginStores.migrateAllPluginStores(container, node.nodeDBHandle);
+	    } catch (Db4oException e) {
+	        System.err.println("Failed to migrate plugin stores due to database error: "+e+" - assuming node.db4o[.crypt] is corrupt.");
+	        Logger.error(this, "Failed to migrate plugin stores due to database error: "+e+" - assuming node.db4o[.crypt] is corrupt.", e);
+            killedDatabase = true;
+	    } catch (Throwable e) {
+	        // Yes this really is necessary. db4o corruption can throw all sorts of crap.
+            System.err.println("Failed to migrate plugin stores due to database error: "+e+" - assuming node.db4o[.crypt] is corrupt.");
+            Logger.error(this, "Failed to migrate plugin stores due to database error: "+e+" - assuming node.db4o[.crypt] is corrupt.", e);
+            killedDatabase = true;
+	    }
+    }
+
+    private void lateInitFECQueue(long nodeDBHandle, ObjectContainer container) {
 		fecQueue = initFECQueue(nodeDBHandle, container, fecQueue);
 		clientContext.setFECQueue(fecQueue);
 	}
@@ -1404,7 +1431,7 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 				synchronized(is) {
 					if(is.getStatus() == CHKInsertSender.NOT_FINISHED)
 						try {
-							is.wait(5 * 1000);
+							is.wait(SECONDS.toMillis(5));
 						} catch(InterruptedException e) {
 							// Ignore
 						}
@@ -1423,7 +1450,7 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 					if(is.completed())
 						break;
 					try {
-						is.wait(10 * 1000);
+						is.wait(SECONDS.toMillis(10));
 					} catch(InterruptedException e) {
 						// Go around again
 					}
@@ -1528,7 +1555,7 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 				synchronized(is) {
 					if(is.getStatus() == SSKInsertSender.NOT_FINISHED)
 						try {
-							is.wait(5 * 1000);
+							is.wait(SECONDS.toMillis(5));
 						} catch(InterruptedException e) {
 							// Ignore
 						}
@@ -1547,7 +1574,7 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 					if(is.getStatus() != SSKInsertSender.NOT_FINISHED)
 						break;
 					try {
-						is.wait(10 * 1000);
+						is.wait(SECONDS.toMillis(10));
 					} catch(InterruptedException e) {
 						// Go around again
 					}
@@ -1838,6 +1865,10 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 		sched = requestStarters.getScheduler(key instanceof NodeSSK, false, true);
 		sched.dequeueOfferedKey(key);
 	}
+	
+	public BookmarkManager getBookmarkManager() {
+		return toadletContainer.getBookmarks();
+	}
 
 	public FreenetURI[] getBookmarkURIs() {
 		return toadletContainer.getBookmarkURIs();
@@ -1853,18 +1884,18 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 			if(killedDatabase) throw new DatabaseDisabledException();
 		}
 		if(checkDupes)
-			this.clientDatabaseExecutor.executeNoDupes(new DBJobWrapper(job), priority, ""+job);
+			this.clientDatabaseExecutor.executeNoDupes(new DBJobWrapper(job), priority, job.toString());
 		else
-			this.clientDatabaseExecutor.execute(new DBJobWrapper(job), priority, ""+job);
+			this.clientDatabaseExecutor.execute(new DBJobWrapper(job), priority, job.toString());
 	}
 
 	private boolean killedDatabase = false;
 
 	private long lastCommitted = System.currentTimeMillis();
 
-	static final int MAX_COMMIT_INTERVAL = 30*1000;
+	static final long MAX_COMMIT_INTERVAL = SECONDS.toMillis(30);
 
-	static final int SOON_COMMIT_INTERVAL = 5*1000;
+	static final long SOON_COMMIT_INTERVAL = SECONDS.toMillis(5);
 
 	class DBJobWrapper implements Runnable {
 
@@ -1926,15 +1957,10 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 					persistentTempBucketFactory.postCommit(node.db);
 				}
 			} catch (Throwable t) {
-				if(t instanceof OutOfMemoryError) {
-					synchronized(NodeClientCore.this) {
-						killedDatabase = true;
-					}
-					OOMHandler.handleOOM((OutOfMemoryError) t);
-				} else {
-					Logger.error(this, "Failed to run database job "+job+" : caught "+t, t);
-				}
-				boolean killed;
+				
+                                Logger.error(this, "Failed to run database job "+job+" : caught "+t, t);
+				
+                                boolean killed;
 				synchronized(NodeClientCore.this) {
 					killed = killedDatabase;
 				}
@@ -1973,22 +1999,6 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 		return clientDatabaseExecutor.getQueueSize(priority);
 	}
 
-	@Override
-	public void handleLowMemory() throws Exception {
-		// Ignore
-	}
-
-	@Override
-	public void handleOutOfMemory() throws Exception {
-		synchronized(this) {
-			killedDatabase = true;
-		}
-		WrapperManager.requestThreadDump();
-		System.err.println("Out of memory: Emergency shutdown to protect database integrity in progress...");
-		WrapperManager.restart();
-		System.exit(NodeInitException.EXIT_OUT_OF_MEMORY_PROTECTING_DATABASE);
-	}
-
 	/**
 	 * Queue a job to be run soon after startup. The job must delete itself.
 	 */
@@ -2013,7 +2023,7 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 		if(clientDatabaseExecutor.onThread()) {
 			job.run(node.db, clientContext);
 		} else {
-			final MutableBoolean finished = new MutableBoolean();
+			final CountDownLatch finished = new CountDownLatch(1);
 			queue(new DBJob() {
 
 				@Override
@@ -2021,10 +2031,7 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 					try {
 						return job.run(container, context);
 					} finally {
-						synchronized(finished) {
-							finished.value = true;
-							finished.notifyAll();
-						}
+						finished.countDown();
 					}
 				}
 
@@ -2034,13 +2041,11 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 				}
 
 			}, priority, false);
-			synchronized(finished) {
-				while(!finished.value) {
-					try {
-						finished.wait();
-					} catch (InterruptedException e) {
-						// Ignore
-					}
+			while (finished.getCount() > 0) {
+				try {
+					finished.await();
+				} catch (InterruptedException e) {
+					// Ignore
 				}
 			}
 		}
@@ -2115,5 +2120,9 @@ public class NodeClientCore implements Persistable, DBJobRunner, OOMHook, Execut
 		node.peers.closerPeer(null, new HashSet<PeerNode>(), key.toNormalizedDouble(), true, false, -1, null, 2.0, key, origHTL, 0, true, realTime, r, false, System.currentTimeMillis(), node.enableNewLoadManagement(realTime));
 		return r.recentlyFailed();
 	}
+
+    public PluginStores getPluginStores() {
+        return pluginStores;
+    }
 
 }

@@ -3,6 +3,10 @@
  * http://www.gnu.org/ for further details of the GPL. */
 package freenet.node;
 
+import static java.util.concurrent.TimeUnit.DAYS;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -66,7 +70,7 @@ public class LocationManager implements ByteCounter {
         }
     }
 
-    static final int TIMEOUT = 60*1000;
+    static final long TIMEOUT = SECONDS.toMillis(60);
     static final int SWAP_MAX_HTL = 10;
     /** Number of swap evaluations, either incoming or outgoing, between resetting our location.
      * There is a 2 in SWAP_RESET chance that a reset will occur on one or other end of a swap request.
@@ -78,15 +82,15 @@ public class LocationManager implements ByteCounter {
      * reduce it to 8000 or 4000. */
     static final int SWAP_RESET = 16000;
 	// FIXME vary automatically
-    static final int SEND_SWAP_INTERVAL = 8000;
+    static final long SEND_SWAP_INTERVAL = SECONDS.toMillis(8);
     /** The average time between sending a swap request, and completion. */
     final BootstrappingDecayingRunningAverage averageSwapTime;
     /** Minimum swap delay */
-    static final int MIN_SWAP_TIME = Node.MIN_INTERVAL_BETWEEN_INCOMING_SWAP_REQUESTS;
+    static final long MIN_SWAP_TIME = Node.MIN_INTERVAL_BETWEEN_INCOMING_SWAP_REQUESTS;
     /** Maximum swap delay */
-    static final int MAX_SWAP_TIME = 60*1000;
+    static final long MAX_SWAP_TIME = MINUTES.toMillis(1);
     /** Don't start swapping until our peers have had a reasonable chance to reconnect. */
-	private static final long STARTUP_DELAY = 60*1000;
+    private static final long STARTUP_DELAY = MINUTES.toMillis(1);
     private static boolean logMINOR;
     final RandomSource r;
     final SwapRequestSender sender;
@@ -123,7 +127,7 @@ public class LocationManager implements ByteCounter {
      * @param l
      */
     public synchronized void setLocation(double l) {
-    	if(l < 0.0 || l > 1.0) {
+    	if(!Location.isValid(l)) {
     		Logger.error(this, "Setting invalid location: "+l, new Exception("error"));
     		return;
     	}
@@ -153,11 +157,11 @@ public class LocationManager implements ByteCounter {
 					clearOldSwapChains();
 					removeTooOldQueuedItems();
 				} finally {
-					node.ticker.queueTimedJob(this, 10*1000);
+					node.ticker.queueTimedJob(this, SECONDS.toMillis(10));
 				}
 			}
-			
-		}, 10*1000);
+
+		}, SECONDS.toMillis(10));
     }
 
     /**
@@ -175,7 +179,7 @@ public class LocationManager implements ByteCounter {
                     long startTime = System.currentTimeMillis();
                     double nextRandom = r.nextDouble();
                     while(true) {
-                        int sleepTime = getSendSwapInterval();
+                        long sleepTime = getSendSwapInterval();
                         sleepTime *= nextRandom;
                         sleepTime = Math.min(sleepTime, Integer.MAX_VALUE);
                         long endTime = startTime + sleepTime;
@@ -183,7 +187,7 @@ public class LocationManager implements ByteCounter {
                         long diff = endTime - now;
                         try {
                             if(diff > 0)
-                                Thread.sleep(Math.min((int)diff, 10000));
+                                Thread.sleep(Math.min((int)diff, SECONDS.toMillis(10)));
                         } catch (InterruptedException e) {
                             // Ignore
                         }
@@ -195,19 +199,20 @@ public class LocationManager implements ByteCounter {
                     }
                     // Don't send one if we are locked
                     if(lock()) {
-                        if(System.currentTimeMillis() - timeLastSuccessfullySwapped > 30*1000) {
+                        if(System.currentTimeMillis() - timeLastSuccessfullySwapped > SECONDS.toMillis(30)) {
                             try {
                                 boolean myFlag = false;
                                 double myLoc = getLocation();
                                 for(PeerNode pn: node.peers.connectedPeers()) {
+                                	PeerLocation l = pn.location;
                                     if(pn.isRoutable()) {
-                                    	synchronized(pn) {
-                                    		double ploc = pn.getLocation();
-                                    		if(Math.abs(ploc - myLoc) <= Double.MIN_VALUE) {
+                                    	synchronized(l) {
+                                    		double ploc = l.getLocation();
+                                    		if(Location.equals(ploc, myLoc)) {
                                     			// Don't reset location unless we're SURE there is a problem.
                                     			// If the node has had its location equal to ours for at least 2 minutes, and ours has been likewise...
                                     			long now = System.currentTimeMillis();
-                                    			if(now - pn.getLocSetTime() > 120*1000 && now - timeLocSet > 120*1000) {
+                                    			if(now - l.getLocationSetTime() > MINUTES.toMillis(2) && now - timeLocSet > MINUTES.toMillis(2)) {
                                     				myFlag = true;
                                     				// Log an ERROR
                                     				// As this is an ERROR, it results from either a bug or malicious action.
@@ -266,8 +271,8 @@ public class LocationManager implements ByteCounter {
     	return node.isOpennetEnabled();
 	}
 
-	public int getSendSwapInterval() {
-    	int interval = (int) averageSwapTime.currentValue();
+	public long getSendSwapInterval() {
+    	long interval = (long) averageSwapTime.currentValue();
     	if(interval < MIN_SWAP_TIME)
     		interval = MIN_SWAP_TIME;
     	if(interval > MAX_SWAP_TIME)
@@ -382,7 +387,7 @@ public class LocationManager implements ByteCounter {
             long hisRandom = hisBufLong[0];
 
             double hisLoc = Double.longBitsToDouble(hisBufLong[1]);
-            if((hisLoc < 0.0) || (hisLoc > 1.0)) {
+            if(!Location.isValid(hisLoc)) {
                 Logger.error(this, "Bad loc: "+hisLoc+" on "+uid);
                 return;
             }
@@ -391,7 +396,7 @@ public class LocationManager implements ByteCounter {
             double[] hisFriendLocs = new double[hisBufLong.length-2];
             for(int i=0;i<hisFriendLocs.length;i++) {
                 hisFriendLocs[i] = Double.longBitsToDouble(hisBufLong[i+2]);
-                if((hisFriendLocs[i] < 0.0) || (hisFriendLocs[i] > 1.0)) {
+                if(!Location.isValid(hisFriendLocs[i])) {
                     Logger.error(this, "Bad friend loc: "+hisFriendLocs[i]+" on "+uid);
                     return;
                 }
@@ -584,7 +589,7 @@ public class LocationManager implements ByteCounter {
                 long hisRandom = hisBufLong[0];
 
                 double hisLoc = Double.longBitsToDouble(hisBufLong[1]);
-                if((hisLoc < 0.0) || (hisLoc > 1.0)) {
+                if(!Location.isValid(hisLoc)) {
                     Logger.error(this, "Bad loc: "+hisLoc+" on "+uid);
                     return;
                 }
@@ -593,7 +598,7 @@ public class LocationManager implements ByteCounter {
                 double[] hisFriendLocs = new double[hisBufLong.length-2];
                 for(int i=0;i<hisFriendLocs.length;i++) {
                     hisFriendLocs[i] = Double.longBitsToDouble(hisBufLong[i+2]);
-                    if((hisFriendLocs[i] < 0.0) || (hisFriendLocs[i] > 1.0)) {
+                    if(!Location.isValid(hisFriendLocs[i])) {
                         Logger.error(this, "Bad friend loc: "+hisFriendLocs[i]+" on "+uid);
                         return;
                     }
@@ -865,7 +870,7 @@ public class LocationManager implements ByteCounter {
     static final int MAX_INCOMING_QUEUE_LENGTH = 10;
 
     /** Prevent timeouts and deadlocks due to A waiting for B waiting for A */
-    static final long MAX_TIME_ON_INCOMING_QUEUE = 30*1000;
+    static final long MAX_TIME_ON_INCOMING_QUEUE = SECONDS.toMillis(30);
 
     void removeTooOldQueuedItems() {
     	while(true) {
@@ -1226,7 +1231,7 @@ public class LocationManager implements ByteCounter {
         double[] locations = Fields.bytesToDoubles(data, 8, data.length-8);
 
         double hisLoc = locations[0];
-        if(hisLoc < 0.0 || hisLoc > 1.0) {
+        if(!Location.isValid(hisLoc)) {
         	Logger.error(this, "Invalid hisLoc in swap commit: "+hisLoc, new Exception("error"));
         	return;
         }
@@ -1317,7 +1322,7 @@ public class LocationManager implements ByteCounter {
         }
     }
 
-    private static final long MAX_AGE = 7*24*60*60*1000;
+    private static final long MAX_AGE = DAYS.toMillis(7);
 
     private final TimeSortedHashtable<Double> knownLocs = new TimeSortedHashtable<Double>();
 

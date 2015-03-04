@@ -3,6 +3,9 @@
  * http://www.gnu.org/ for further details of the GPL. */
 package freenet.io.xfer;
 
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import freenet.io.comm.AsyncMessageCallback;
 import freenet.io.comm.AsyncMessageFilterCallback;
 import freenet.io.comm.ByteCounter;
@@ -35,9 +38,9 @@ public class BulkTransmitter {
 	}
 
 	/** If no packets sent in this period, and no completion acknowledgement / cancellation, assume failure. */
-	static final int TIMEOUT = 5*60*1000;
+	static final long TIMEOUT = MINUTES.toMillis(5);
 	/** Time to hang around listening for the last FNPBulkReceivedAll message */
-	static final int FINAL_ACK_TIMEOUT = 10*1000;
+	static final long FINAL_ACK_TIMEOUT = SECONDS.toMillis(10);
 	final AllSentCallback allSentCallback;
 	/** Available blocks */
 	final PartiallyReceivedBulk prb;
@@ -249,7 +252,8 @@ outer:	while(true) {
 			int max = Math.min(Integer.MAX_VALUE, prb.blocks);
 			max = Math.min(max, (int)Math.min(Integer.MAX_VALUE, peer.getThrottleWindowSize()));
 			// FIXME hardcoded limit for memory usage. We can probably get away with more for now but if we start doing lots of bulk transfers we'll need to limit this globally...
-			max = Math.min(max, 100);
+			// FIXME Need to introduce the global limiter of [code]max[/code] for memory management instead of hard-code for each, no? 
+			max = Math.min(max, 100); 
 			if(max < 1) max = 1;
 			
 			if(prb.isAborted()) {
@@ -304,7 +308,7 @@ outer:	while(true) {
 					
 					// Wait for a packet to come in, BulkReceivedAll or BulkReceiveAborted
 					try {
-						wait(60*1000);
+						wait(SECONDS.toMillis(60));
 					} catch (InterruptedException e) {
 						// No problem
 						continue;

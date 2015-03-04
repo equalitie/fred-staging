@@ -73,7 +73,7 @@ public class FCPConnectionHandler implements Closeable {
 	private FCPClient foreverClient;
 	final BucketFactory bf;
 	final HashMap<String, ClientRequest> requestsByIdentifier;
-	protected final String connectionIdentifier;
+	public final String connectionIdentifier;
 	private static volatile boolean logMINOR;
 	private boolean killedDupe;
 
@@ -157,7 +157,7 @@ public class FCPConnectionHandler implements Closeable {
 		SubscribeUSK[] uskSubscriptions2;
 		synchronized(this) {
 			if(isClosed) {
-				Logger.error(this, "Already closed: "+this, new Exception("debug"));
+				// This is normal, both input and output handlers will call close().
 				return;
 			}
 			isClosed = true;

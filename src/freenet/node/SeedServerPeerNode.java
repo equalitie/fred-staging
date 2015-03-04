@@ -3,6 +3,9 @@
  * http://www.gnu.org/ for further details of the GPL. */
 package freenet.node;
 
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import java.net.InetAddress;
 import java.util.ArrayList;
 
@@ -93,7 +96,7 @@ public class SeedServerPeerNode extends PeerNode {
 						Logger.error(this, "Caught "+t, t);
 					}
 				}
-			}, 5*1000);
+			}, SECONDS.toMillis(5));
 		}
 	}
 
@@ -142,7 +145,7 @@ public class SeedServerPeerNode extends PeerNode {
 		if(!om.announcer.enoughPeers()) return false;
 		// We have enough peers, but we might fluctuate a bit.
 		// Drop the connection once we have consistently had enough opennet peers for 5 minutes.
-		return System.currentTimeMillis() - om.announcer.timeGotEnoughPeers() > 5*60*1000;
+		return System.currentTimeMillis() - om.announcer.timeGotEnoughPeers() > MINUTES.toMillis(5);
 	}
 
 	@Override

@@ -7,8 +7,11 @@ import java.io.File;
 import java.io.IOException;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.WeakHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.tanukisoftware.wrapper.WrapperManager;
 
@@ -41,7 +44,6 @@ import freenet.support.Base64;
 import freenet.support.Logger;
 import freenet.support.Logger.LogLevel;
 import freenet.support.MutableBoolean;
-import freenet.support.OOMHandler;
 import freenet.support.api.BooleanCallback;
 import freenet.support.api.Bucket;
 import freenet.support.api.IntCallback;
@@ -158,8 +160,6 @@ public class FCPServer implements Runnable, DownloadCache {
 				realRun();
 			} catch (IOException e) {
 				if(logMINOR) Logger.minor(this, "Caught "+e, e);
-			} catch (OutOfMemoryError e) {
-				OOMHandler.handleOOM(e);
 			} catch (Throwable t) {
 				Logger.error(this, "Caught "+t, t);
 			}
@@ -273,20 +273,24 @@ public class FCPServer implements Runnable, DownloadCache {
 
 		@Override
 		public void set(String val) throws InvalidConfigValueException {
-			if(!val.equals(get())) {
-				try {
-					FCPServer server = node.getFCPServer();
-					server.networkInterface.setBindTo(val, true);
-					server.bindTo = val;
-
-					synchronized(server.networkInterface) {
-						server.networkInterface.notifyAll();
-					}
-				} catch (IOException e) {
+			String oldValue = get();
+			if(!val.equals(oldValue)) {
+				FCPServer server = node.getFCPServer();
+				
+				String[] failedAddresses = server.networkInterface.setBindTo(val, true);
+				if(failedAddresses != null) {
 					// This is an advanced option for reasons of reducing clutter,
 					// but it is expected to be used by regular users, not devs.
 					// So we translate the error messages.
-					throw new InvalidConfigValueException(l10n("couldNotChangeBindTo", "error", e.getLocalizedMessage()));
+					server.networkInterface.setBindTo(oldValue, true);
+					throw new InvalidConfigValueException(l10n("couldNotChangeBindTo", "failedInterfaces", Arrays.toString(failedAddresses)));
+				}
+				
+				server.networkInterface.setBindTo(val, true);
+				server.bindTo = val;
+				
+				synchronized(server.networkInterface) {
+					server.networkInterface.notifyAll();
 				}
 			}
 		}
@@ -309,9 +313,13 @@ public class FCPServer implements Runnable, DownloadCache {
 		}
 
 		@Override
-		public void set(String val) {
+		public void set(String val) throws InvalidConfigValueException {
 			if (!val.equals(get())) {
+				try {
 				node.getFCPServer().networkInterface.setAllowedHosts(val);
+				} catch(IllegalArgumentException e) {
+					throw new InvalidConfigValueException(e);
+				}
 			}
 		}
 	}
@@ -329,9 +337,13 @@ public class FCPServer implements Runnable, DownloadCache {
 		}
 
 		@Override
-		public void set(String val) {
+		public void set(String val) throws InvalidConfigValueException {
 			if (!val.equals(get())) {
+				try {
 				node.getFCPServer().allowedHostsFullAccess.setAllowedHosts(val);
+				} catch(IllegalArgumentException e) {
+					throw new InvalidConfigValueException(e);
+				}
 			}
 		}
 
@@ -508,10 +520,8 @@ public class FCPServer implements Runnable, DownloadCache {
 
 	public boolean removeGlobalRequestBlocking(final String identifier) throws MessageInvalidException, DatabaseDisabledException {
 		if(!globalRebootClient.removeByIdentifier(identifier, true, this, null, core.clientContext)) {
-			final Object sync = new Object();
-			final MutableBoolean done = new MutableBoolean();
-			final MutableBoolean success = new MutableBoolean();
-			done.value = false;
+			final CountDownLatch done = new CountDownLatch(1);
+			final AtomicBoolean success = new AtomicBoolean();
 			core.clientContext.jobRunner.queue(new DBJob() {
 
 				@Override
@@ -527,36 +537,28 @@ public class FCPServer implements Runnable, DownloadCache {
 					} catch (Throwable t) {
 						Logger.error(this, "Caught removing identifier "+identifier+": "+t, t);
 					} finally {
-						synchronized(sync) {
-							success.value = succeeded;
-							done.value = true;
-							sync.notifyAll();
-						}
+						success.set(succeeded);
+						done.countDown();
 					}
 					return true;
 				}
 
 			}, NativeThread.HIGH_PRIORITY, false);
-			synchronized(sync) {
-				while(!done.value) {
-					try {
-						sync.wait();
-					} catch (InterruptedException e) {
-						// Ignore
-					}
+			while (done.getCount() > 0) {
+				try {
+					done.await();
+				} catch (InterruptedException e) {
+					// Ignore
 				}
-				return success.value;
 			}
+			return success.get();
 		} else return true;
 	}
 
 	public boolean removeAllGlobalRequestsBlocking() throws DatabaseDisabledException {
 		globalRebootClient.removeAll(null, core.clientContext);
-
-		final Object sync = new Object();
-		final MutableBoolean done = new MutableBoolean();
-		final MutableBoolean success = new MutableBoolean();
-		done.value = false;
+		final CountDownLatch done = new CountDownLatch(1);
+		final AtomicBoolean success = new AtomicBoolean();
 		core.clientContext.jobRunner.queue(new DBJob() {
 
 			@Override
@@ -576,26 +578,21 @@ public class FCPServer implements Runnable, DownloadCache {
 					t.printStackTrace();
 					System.err.println("Your requests have not been deleted!");
 				} finally {
-					synchronized(sync) {
-						success.value = succeeded;
-						done.value = true;
-						sync.notifyAll();
-					}
+					success.set(succeeded);
+					done.countDown();
 				}
 				return true;
 			}
 
 		}, NativeThread.HIGH_PRIORITY, false);
-		synchronized(sync) {
-			while(!done.value) {
-				try {
-					sync.wait();
-				} catch (InterruptedException e) {
-					// Ignore
-				}
+		while (done.getCount() > 0) {
+			try {
+				done.await();
+			} catch (InterruptedException e) {
+				// Ignore
 			}
-			return success.value;
 		}
+		return success.get();
 	}
 
 	public void makePersistentGlobalRequestBlocking(final FreenetURI fetchURI, final boolean filterData,

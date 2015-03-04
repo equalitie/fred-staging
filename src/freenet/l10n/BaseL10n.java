@@ -34,7 +34,10 @@ import freenet.support.io.FileUtil;
  */
 public class BaseL10n {
 
-	/** @see "http://www.omniglot.com/language/names.htm" */
+	/**
+	 * @see "http://www.omniglot.com/language/names.htm"
+	 * @see "http://loc.gov/standards/iso639-2/php/code_list.php"
+	 */
 	public enum LANGUAGE {
 
 		// Windows language codes must be preceded with WINDOWS and be in upper case hex, 4 digits.
@@ -50,13 +53,14 @@ public class BaseL10n {
 		ITALIAN("it", "Italiano", "ita", new String[] { "WINDOWS0410", "WINDOWS0810"}),
 		NORWEGIAN("no", "Norsk", "nor", new String[] { "WINDOWS0414", "WINDOWS0814"}),
 		POLISH("pl", "Polski", "pol", new String[] { "WINDOWS0415"}),
-		SWEDISH("se", "Svenska", "svk", new String[] { "WINDOWS041D", "WINDOWS081D"}),
+		SWEDISH("sv", "Svenska", "swe", new String[] { "WINDOWS041D", "WINDOWS081D"}),
 		CHINESE("zh-cn", "中文(简体)", "chn", new String[] { "WINDOWS0804", "WINDOWS1004" }),
 		// simplified chinese, used on mainland, Singapore and Malaysia
 		CHINESE_TAIWAN("zh-tw", "中文(繁體)", "zh-tw", new String[] { "WINDOWS0404", "WINDOWS0C04", "WINDOWS1404" }), 
 		// traditional chinese, used in Taiwan, Hong Kong and Macau
 		RUSSIAN("ru", "Русский", "rus", new String[] { "WINDOWS0419" }), // Just one variant for russian. Belorussian is separate, code page 423, speakers may or may not speak russian, I'm not including it.
 		JAPANESE("ja", "日本語", "jpn", new String[] { "WINDOWS0411" }),
+		BRAZILIAN_PORTUGUESE("pt-br", "Português do Brasil", "pt-br", new String[] { "WINDOWS0416" }),
 		UNLISTED("unlisted", "unlisted", "unlisted", new String[] {});
 		/** The identifier we use internally : MUST BE UNIQUE! */
 		public final String shortCode;
@@ -326,12 +330,11 @@ public class BaseL10n {
 
 		try {
 			// We don't set deleteOnExit on it : if the save operation fails, we want a backup
-			// FIXME: REDFLAG: not symlink-race proof!
-			File tempFile = new File(finalFile.getParentFile(), finalFile.getName() + ".bak");
+			File tempFile = File.createTempFile(finalFile.getName(), ".bak", finalFile.getParentFile());;
 			Logger.minor(this.getClass(), "The temporary filename is : " + tempFile);
 
 			fos = new FileOutputStream(tempFile);
-			this.translationOverride.writeTo(fos);
+			this.translationOverride.writeToBigBuffer(fos);
 			fos.close();
 			fos = null;
 
@@ -410,16 +413,33 @@ public class BaseL10n {
 
 	/**
 	 * Get a localized string and put it in a HTMLNode for the translation page.
-	 * @param key Key to search for.
+	 * @param values Values to replace patterns with.
 	 * @return HTMLNode
 	 */
 	public HTMLNode getHTMLNode(String key) {
+		return getHTMLNode(key, null, null);
+	}
+	
+	/**
+	 * Get a localized string and put it in a HTMLNode for the translation page.
+	 * @param key Key to search for.
+	 * @param patterns Patterns to replace. May be null, if so values must also be null.
+	 * @param values Values to replace patterns with.
+	 * @return HTMLNode
+	 */
+	public HTMLNode getHTMLNode(String key, String[] patterns, String[] values) {
 		String value = this.getString(key, true);
 		if (value != null) {
-			return new HTMLNode("#", value);
+			if(patterns != null)
+				return new HTMLNode("#", getString(key, patterns, values));
+			else
+				return new HTMLNode("#", value);
 		}
 		HTMLNode translationField = new HTMLNode("span", "class", "translate_it");
-		translationField.addChild("#", getDefaultString(key));
+		if(patterns != null)
+			translationField.addChild("#", getDefaultString(key, patterns, values));
+		else
+			translationField.addChild("#", getDefaultString(key));
 		translationField.addChild("a", "href", TranslationToadlet.TOADLET_URL + "?translate=" + key).addChild("small", " (translate it in your native language!)");
 
 		return translationField;
@@ -446,6 +466,22 @@ public class BaseL10n {
 		return key;
 	}
 
+	/**
+	 * Get the default value for a key.
+	 * @param key Key to search for.
+	 * @return String
+	 */
+	public String getDefaultString(String key, String[] patterns, String[] values) {
+		assert (patterns.length == values.length);
+		String result = getDefaultString(key);
+
+		for (int i = 0; i < patterns.length; i++) {
+			result = result.replaceAll("\\$\\{" + patterns[i] + "\\}", quoteReplacement(values[i]));
+		}
+
+		return result;
+	}
+	
 	/**
 	 * Get a localized string, and replace on-the-fly some values.
 	 * @param key Key to search for.
@@ -509,6 +545,7 @@ public class BaseL10n {
 	 * @param key Key to search for.
 	 * @param patterns Patterns to replace, ${ and } are not included.
 	 * @param values Replacement values.
+	 * @deprecated Use {@link #addL10nSubstitution(HTMLNode, String, String[], HTMLNode[])} instead.
 	 */
 	@Deprecated
 	public void addL10nSubstitution(HTMLNode node, String key, String[] patterns, String[] values) {
@@ -519,15 +556,15 @@ public class BaseL10n {
 		}
 		node.addChild("%", result);
 	}
-	
-	public void addL10nSubstitution(HTMLNode node, String key, String[] patterns, HTMLNode[] values) {
-		String value = getString(key);
-		addL10nSubstitutionInner(node, key, value, patterns, values);
-	}
-	
-	/** This is *much* safer. Callers won't accidentally pass in unencoded strings and
-	 * cause vulnerabilities. Callers should try to reuse parameters if possible. We 
-	 * automatically close each tag: When a pattern ${name} is matched, we search for
+
+	/**
+	 * Loads an L10n string, replaces variables such as ${link} or ${bold} in it with {@link HTMLNode}s
+	 * and adds the result to the given HTMLNode.
+	 * 
+	 * This is *much* safer than the deprecated {@link #addL10nSubstitution(HTMLNode, String, String[], String[])}. 
+	 * Callers won't accidentally pass in unencoded strings and cause vulnerabilities.
+	 * Callers should try to reuse parameters if possible.
+	 * We automatically close each tag: When a pattern ${name} is matched, we search for
 	 * ${/name}. If we find it, we make the tag enclose everything between the two; if we
 	 * can't find it, we just add it with no children. It is not possible to create an
 	 * HTMLNode representing a tag closure, so callers will need to change their code to
@@ -535,12 +572,31 @@ public class BaseL10n {
 	 * strings themselves to always close the tag properly, rather than using a generic
 	 * /link for multiple links as we use in some places.
 	 * 
-	 * Example:
+	 * <p><b>Examples</b>:
+	 * <p>TranslationLookup.string=This is a ${link}link${/link} about ${text}.</p>
+	 * <p>
+	 * <code>addL10nSubstitution(html, "TranslationLookup.string", new String[] { "link", "text" },
+	 *   new HTMLNode[] { HTMLNode.link("/KSK@gpl.txt"), HTMLNode.text("blah") });</code>
+	 * </p>
+	 * <br>
+	 * <p>TranslationLookup.string=${bold}This${/bold} is a bold text.</p>
+	 * <p>
+	 * <code>addL10nSubstitution(html, "TranslationLookup.string", new String[] { "bold" },
+	 *   new HTMLNode[] { HTMLNode.STRONG });</code>
+	 * </p>
 	 * 
-	 * addL10nSubstitution(html, "TranslationLookup.string", new String[] { "link", "text" },
-	 *   new HTMLNode[] { HTMLNode.link("/KSK@gpl.txt"), HTMLNode.text("blah") })
-	 * 
-	 * TranslationLookup.string=This is a ${link}link${/link} about ${text}.
+	 * @param node The {@link HTMLNode} to which the L10n should be added after substitution was done.
+	 * @param key The key of the L10n string which shall be used. 
+	 * @param patterns Specifies things such as ${link} which shall be replaced in the L10n string with {@link HTMLNode}s.
+	 * @param values For each entry in the previous array parameter, this array specifies the {@link HTMLNode} with which it shall be replaced. 
+	 */
+	public void addL10nSubstitution(HTMLNode node, String key, String[] patterns, HTMLNode[] values) {
+		String value = getString(key);
+		addL10nSubstitutionInner(node, key, value, patterns, values);
+	}
+
+	/**
+	 * @see #addL10nSubstitution(HTMLNode, String, String[], HTMLNode[])
 	 */
 	private void addL10nSubstitutionInner(HTMLNode node, String key, String value, String[] patterns, HTMLNode[] values) {
 		int x;

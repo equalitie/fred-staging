@@ -12,6 +12,7 @@ import java.nio.channels.WritableByteChannel;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 import freenet.support.math.MersenneTwister;
 
@@ -55,7 +56,8 @@ public class BucketTools {
 		WritableByteChannel writeChannel = Channels.newChannel(out);
 		try {
 
-		ByteBuffer buffer = ByteBuffer.allocateDirect(BUFFER_SIZE);
+		// No benefit to allocateDirect() as we're wrapping streams anyway, and worse, it'd be a memory leak.
+		ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
 		while (readChannel.read(buffer) != -1) {
 			buffer.flip();
 			while(buffer.hasRemaining())
@@ -488,5 +490,41 @@ public class BucketTools {
 			return b;
 		} finally { Closer.close(os); }
 	}
+
+    public static boolean equalBuckets(Bucket a, Bucket b) throws IOException {
+        if(a.size() != b.size()) return false;
+        long size = a.size();
+        InputStream aIn = null, bIn = null;
+        try {
+            aIn = a.getInputStream();
+            bIn = b.getInputStream();
+            return FileUtil.equalStreams(aIn, bIn, size);
+        } finally {
+            aIn.close();
+            bIn.close();
+        }
+    }
+    
+    /** @deprecated Only for unit tests */
+    public static void fill(Bucket bucket, Random random, long length) throws IOException {
+        OutputStream os = null;
+        try {
+            os = bucket.getOutputStream();
+            FileUtil.fill(os, random, length);
+        } finally {
+            if(os != null) os.close();
+        }
+    }
+
+    /** Fill a bucket with hard to identify random data */
+    public static void fill(Bucket bucket, long length) throws IOException {
+        OutputStream os = null;
+        try {
+            os = bucket.getOutputStream();
+            FileUtil.fill(os, length);
+        } finally {
+            if(os != null) os.close();
+        }
+    }
 
 }

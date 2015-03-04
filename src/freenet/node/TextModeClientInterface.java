@@ -1,5 +1,7 @@
 package freenet.node;
 
+import static java.util.concurrent.TimeUnit.MINUTES;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -51,7 +53,6 @@ import freenet.support.HexUtil;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.Logger.LogLevel;
-import freenet.support.OOMHandler;
 import freenet.support.SimpleFieldSet;
 import freenet.support.SizeUtil;
 import freenet.support.api.Bucket;
@@ -75,7 +76,6 @@ public class TextModeClientInterface implements Runnable {
     final HighLevelSimpleClient client;
     final File downloadsDir;
     final InputStream in;
-    final OutputStream out;
     final Writer w;
     private boolean doneSomething;
     private static final String ENCODING = "UTF-8";
@@ -98,7 +98,6 @@ public class TextModeClientInterface implements Runnable {
         client = core.makeClient(RequestStarter.INTERACTIVE_PRIORITY_CLASS, true, false);
     	this.downloadsDir = server.downloadsDir;
     	this.in = in;
-    	this.out = out;
         try {
         	w = new OutputStreamWriter(out, ENCODING);
 			client.addEventHook(new EventDumper(new BufferedWriter(new OutputStreamWriter(out, ENCODING)), false));
@@ -107,14 +106,13 @@ public class TextModeClientInterface implements Runnable {
 		}
 	}
 
-    public TextModeClientInterface(Node n, HighLevelSimpleClient c, File downloadDir, InputStream in, OutputStream out) {
+    public TextModeClientInterface(Node n, NodeClientCore core, HighLevelSimpleClient c, File downloadDir, InputStream in, OutputStream out) {
     	this.n = n;
     	this.r = n.random;
-    	this.core = n.clientCore;
+    	this.core = core;
     	this.client = c;
     	this.downloadsDir = downloadDir;
     	this.in = in;
-    	this.out = out;
         try {
         	w = new OutputStreamWriter(out, ENCODING);
 			client.addEventHook(new EventDumper(new BufferedWriter(new OutputStreamWriter(out, ENCODING)), false));
@@ -129,10 +127,8 @@ public class TextModeClientInterface implements Runnable {
     	try {
     		realRun();
     	} catch (IOException e) {
-    		if(logMINOR) Logger.minor(this, "Caught "+e, e);
-		} catch (OutOfMemoryError e) {
-			OOMHandler.handleOOM(e);
-    	} catch (Throwable t) {
+            if(logMINOR) Logger.minor(this, "Caught "+e, e);
+        } catch (Throwable t) {
     		Logger.error(this, "Caught "+t, t);
     	}
     }
@@ -144,8 +140,8 @@ public class TextModeClientInterface implements Runnable {
 		while(true) {
 			try {
 				w.write("TMCI> ");
-				out.flush();
-				if(processLine(reader,out)) {
+				w.flush();
+				if(processLine(reader)) {
 					reader.close();
 					return;
 				}
@@ -233,7 +229,7 @@ public class TextModeClientInterface implements Runnable {
      * Process a single command.
      * @throws IOException If we could not write the data to stdout.
      */
-    private boolean processLine(BufferedReader reader, final OutputStream out) throws IOException {
+    private boolean processLine(BufferedReader reader) throws IOException {
         String line;
         StringBuilder outsb = new StringBuilder();
         try {
@@ -260,7 +256,7 @@ public class TextModeClientInterface implements Runnable {
                 outsb.append("Malformed URI: ").append(key).append(" : ").append(e2);
 		outsb.append("\r\n");
 		w.write(outsb.toString());
-		out.flush();
+		w.flush();
                 return false;
             }
             try {
@@ -274,7 +270,7 @@ public class TextModeClientInterface implements Runnable {
 					outsb.append("Data is more than 32K: ").append(data.size());
 					outsb.append("\r\n");
 					w.write(outsb.toString());
-					out.flush();
+					w.flush();
 					return false;
 				}
 				byte[] dataBytes = BucketTools.toByteArray(data);
@@ -290,7 +286,7 @@ public class TextModeClientInterface implements Runnable {
 					outsb.append("Data may contain escape codes which could cause the terminal to run arbitrary commands! Save it to a file if you must with GETFILE:");
 					outsb.append("\r\n");
 					w.write(outsb.toString());
-					out.flush();
+					w.flush();
 					return false;
 				}
 				outsb.append("Data:\r\n");
@@ -315,7 +311,7 @@ public class TextModeClientInterface implements Runnable {
 	                outsb.append("Malformed URI: ").append(key).append(" : ").append(e2);
 			outsb.append("\r\n");
 			w.write(outsb.toString());
-			out.flush();
+			w.flush();
 	                return false;
 	            }
 	            try {
@@ -334,7 +330,7 @@ public class TextModeClientInterface implements Runnable {
 						outsb.append("Data is more than 32K: ").append(data.size());
 						outsb.append("\r\n");
 						w.write(outsb.toString());
-						out.flush();
+						w.flush();
 						return false;
 					}
 					byte[] dataBytes = BucketTools.toByteArray(data);
@@ -350,7 +346,7 @@ public class TextModeClientInterface implements Runnable {
 						outsb.append("Data may contain escape codes which could cause the terminal to run arbitrary commands! Save it to a file if you must with GETFILE:");
 						outsb.append("\r\n");
 						w.write(outsb.toString());
-						out.flush();
+						w.flush();
 						return false;
 					}
 					outsb.append("Data:\r\n");
@@ -374,7 +370,7 @@ public class TextModeClientInterface implements Runnable {
                 outsb.append("Malformed URI: ").append(key).append(" : ").append(e2);
 		outsb.append("\r\n");
 		w.write(outsb.toString());
-		out.flush();
+		w.flush();
                 return false;
             }
             try {
@@ -437,7 +433,7 @@ public class TextModeClientInterface implements Runnable {
     	}, 0);
     	outsb.append("\r\n");
     	w.write(outsb.toString());
-    	out.flush();
+    	w.flush();
     	return false;
     }else if(uline.startsWith("FILTER:")) {
     	line = line.substring("FILTER:".length()).trim();
@@ -480,31 +476,31 @@ public class TextModeClientInterface implements Runnable {
     	n.getNodeUpdater().blow("caught an  IOException : (Incompetent Operator) :p", true);
     	outsb.append("\r\n");
     	w.write(outsb.toString());
-    	out.flush();
+    	w.flush();
     	return false;
 	} else if(uline.startsWith("SHUTDOWN")) {
 		StringBuilder sb = new StringBuilder();
 		sb.append("Shutting node down.\r\n");
 		w.write(sb.toString());
-		out.flush();
+		w.flush();
 		n.exit("Shutdown from console");
 	} else if(uline.startsWith("RESTART")) {
 		StringBuilder sb = new StringBuilder();
 		sb.append("Restarting the node.\r\n");
 		w.write(sb.toString());
-		out.flush();
+		w.flush();
 		n.getNodeStarter().restart();
 	} else if(uline.startsWith("QUIT") && (core.directTMCI == this)) {
 		StringBuilder sb = new StringBuilder();
 		sb.append("QUIT command not available in console mode.\r\n");
 		w.write(sb.toString());
-		out.flush();
+		w.flush();
 		return false;
         } else if(uline.startsWith("QUIT")) {
 		StringBuilder sb = new StringBuilder();
 		sb.append("Closing connection.\r\n");
 		w.write(sb.toString());
-		out.flush();
+		w.flush();
 		return true;
         } else if(uline.startsWith("MEMSTAT")) {
 		Runtime rt = Runtime.getRuntime();
@@ -535,13 +531,13 @@ public class TextModeClientInterface implements Runnable {
 		sb.append("OS Version:\u00a0" + System.getProperty("os.version")+"\r\n");
 		sb.append("OS Architecture:\u00a0" + System.getProperty("os.arch")+"\r\n");
 		w.write(sb.toString());
-		out.flush();
+		w.flush();
 		return false;
 	} else if(uline.startsWith("HELP")) {
 		printHeader(w);
 		outsb.append("\r\n");
 		w.write(outsb.toString());
-		out.flush();
+		w.flush();
 		return false;
         } else if(uline.startsWith("PUT:") || (getCHKOnly = uline.startsWith("GETCHK:"))) {
         	if(getCHKOnly)
@@ -574,7 +570,7 @@ public class TextModeClientInterface implements Runnable {
             	}
 		outsb.append("\r\n");
 		w.write(outsb.toString());
-		out.flush();
+		w.flush();
             	return false;
             }
 
@@ -601,7 +597,7 @@ public class TextModeClientInterface implements Runnable {
         		printHeader(w);
 			outsb.append("\r\n");
 			w.write(outsb.toString());
-			out.flush();
+			w.flush();
         		return false;
         	}
         	
@@ -734,7 +730,7 @@ public class TextModeClientInterface implements Runnable {
         		outsb.append("PUTSSK:<insert uri>;<url to redirect to>");
 			outsb.append("\r\n");
 			w.write(outsb.toString());
-			out.flush();
+			w.flush();
         		return false;
         	}
         	String[] split = cmd.split(";");
@@ -816,7 +812,7 @@ public class TextModeClientInterface implements Runnable {
         	String nodeIdentifier = (line.substring("DISABLEPEER:".length())).trim();
         	if(!havePeer(nodeIdentifier)) {
         		w.write(("no peer for "+nodeIdentifier+"\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
         	if(disablePeer(nodeIdentifier)) {
@@ -829,7 +825,7 @@ public class TextModeClientInterface implements Runnable {
         	String nodeIdentifier = (line.substring("ENABLEPEER:".length())).trim();
         	if(!havePeer(nodeIdentifier)) {
         		w.write(("no peer for "+nodeIdentifier+"\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
         	if(enablePeer(nodeIdentifier)) {
@@ -842,18 +838,18 @@ public class TextModeClientInterface implements Runnable {
 			String nodeIdentifier = (line.substring("SETPEERLISTENONLY:".length())).trim();
         	if(!havePeer(nodeIdentifier)) {
         		w.write(("no peer for "+nodeIdentifier+"\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
 			PeerNode pn = n.getPeerNode(nodeIdentifier);
         	if(pn == null) {
         		w.write(("n.getPeerNode() failed to get peer details for "+nodeIdentifier+"\r\n\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
 			if(!(pn instanceof DarknetPeerNode)) {
 				w.write(("Error: "+nodeIdentifier+" identifies a non-darknet peer and this command is only available for darknet peers\r\n\r\n"));
-				out.flush();
+				w.flush();
 				return false;
 			}
 			DarknetPeerNode dpn = (DarknetPeerNode) pn;
@@ -863,18 +859,18 @@ public class TextModeClientInterface implements Runnable {
 			String nodeIdentifier = (line.substring("UNSETPEERLISTENONLY:".length())).trim();
         	if(!havePeer(nodeIdentifier)) {
         		w.write(("no peer for "+nodeIdentifier+"\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
 			PeerNode pn = n.getPeerNode(nodeIdentifier);
         	if(pn == null) {
         		w.write(("n.getPeerNode() failed to get peer details for "+nodeIdentifier+"\r\n\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
 			if(!(pn instanceof DarknetPeerNode)) {
 				w.write(("Error: "+nodeIdentifier+" identifies a non-darknet peer and this command is only available for darknet peers\r\n\r\n"));
-				out.flush();
+				w.flush();
 				return false;
 			}
 			DarknetPeerNode dpn = (DarknetPeerNode) pn;
@@ -905,13 +901,13 @@ public class TextModeClientInterface implements Runnable {
         	String nodeIdentifier = (line.substring("PEER:".length())).trim();
         	if(!havePeer(nodeIdentifier)) {
         		w.write(("no peer for "+nodeIdentifier+"\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
         	PeerNode pn = n.getPeerNode(nodeIdentifier);
         	if(pn == null) {
         		w.write(("n.getPeerNode() failed to get peer details for "+nodeIdentifier+"\r\n\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
         	SimpleFieldSet fs = pn.exportFieldSet();
@@ -920,17 +916,17 @@ public class TextModeClientInterface implements Runnable {
         	String nodeIdentifier = (line.substring("PEERWMD:".length())).trim();
         	if(!havePeer(nodeIdentifier)) {
         		w.write(("no peer for "+nodeIdentifier+"\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
         	PeerNode pn = n.getPeerNode(nodeIdentifier);
         	if(pn == null) {
         		w.write(("n.getPeerNode() failed to get peer details for "+nodeIdentifier+"\r\n\r\n"));
-        		out.flush();
+        		w.flush();
         		return false;
         	}
         	SimpleFieldSet fs = pn.exportFieldSet();
-        	SimpleFieldSet meta = pn.exportMetadataFieldSet();
+        	SimpleFieldSet meta = pn.exportMetadataFieldSet(System.currentTimeMillis());
         	if(!meta.isEmpty())
         	 	fs.put("metadata", meta);
         	outsb.append(fs.toString());
@@ -959,7 +955,7 @@ public class TextModeClientInterface implements Runnable {
         } else if(uline.startsWith("PLUGLIST")) {
         	outsb.append(n.pluginManager.dumpPlugins());
         } else if(uline.startsWith("PLUGKILL:")) {
-        	n.pluginManager.killPlugin(line.substring("PLUGKILL:".length()).trim(), 60*1000, false);
+        	n.pluginManager.killPlugin(line.substring("PLUGKILL:".length()).trim(), MINUTES.toMillis(1), false);
         } else if(uline.startsWith("ANNOUNCE")) {
         	OpennetManager om = n.getOpennet();
         	if(om == null) {
@@ -977,7 +973,7 @@ public class TextModeClientInterface implements Runnable {
         		private void write(String msg) {
         			try {
         				w.write(("ANNOUNCE:"+target+":"+msg+"\r\n"));
-        				out.flush();
+        				w.flush();
         			} catch (IOException e) {
         				// Ignore
         			}
@@ -1031,7 +1027,7 @@ public class TextModeClientInterface implements Runnable {
         }
         outsb.append("\r\n");
         w.write(outsb.toString());
-        out.flush();
+        w.flush();
         return false;
     }
 
@@ -1148,7 +1144,7 @@ public class TextModeClientInterface implements Runnable {
         SimpleFieldSet fs;
         System.out.println("Connecting to:\r\n"+content);
         try {
-            fs = new SimpleFieldSet(content, false, true);
+            fs = new SimpleFieldSet(content, false, true, false);
         } catch (IOException e) {
             System.err.println("Did not parse: "+e);
             e.printStackTrace();

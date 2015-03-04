@@ -23,7 +23,6 @@ import freenet.keys.FreenetURI;
 import freenet.l10n.NodeL10n;
 import freenet.node.DarknetPeerNode;
 import freenet.node.Node;
-import freenet.node.NodeClientCore;
 import freenet.node.NodeStarter;
 import freenet.node.Version;
 import freenet.node.useralerts.UserAlert;
@@ -34,13 +33,13 @@ import freenet.support.MultiValueTable;
 import freenet.support.Logger.LogLevel;
 import freenet.support.api.Bucket;
 import freenet.support.api.HTTPRequest;
+import freenet.support.io.Closer;
 import freenet.support.io.FileUtil;
+import freenet.support.io.LineReadingInputStream;
 
 public class WelcomeToadlet extends Toadlet {
 
-    final NodeClientCore core;
     final Node node;
-    final BookmarkManager bookmarkManager;
 
     private static volatile boolean logMINOR;
     static {
@@ -53,13 +52,11 @@ public class WelcomeToadlet extends Toadlet {
         });
     }
 
-    WelcomeToadlet(HighLevelSimpleClient client, NodeClientCore core, Node node, BookmarkManager bookmarks) {
+    WelcomeToadlet(HighLevelSimpleClient client, Node node) {
         super(client);
         this.node = node;
-        this.core = core;
-        this.bookmarkManager = bookmarks;
     }
-
+    
     void redirectToRoot(ToadletContext ctx) throws ToadletContextClosedException, IOException {
         MultiValueTable<String, String> headers = new MultiValueTable<String, String>();
         headers.put("Location", "/");
@@ -105,26 +102,18 @@ public class WelcomeToadlet extends Toadlet {
             addCategoryToList(cats.get(i), list.addChild("li").addChild("ul"), noActiveLinks, ctx);
         }
     }
+    
+    public boolean allowPOSTWithoutPassword() {
+    	// We need to show some confirmation pages.
+    	return true;
+    }
 
 	public void handleMethodPOST(URI uri, HTTPRequest request, ToadletContext ctx) throws ToadletContextClosedException, IOException {
-        if (!ctx.isAllowedFullAccess()) {
-            super.sendErrorPage(ctx, 403, "Unauthorized", NodeL10n.getBase().getString("Toadlet.unauthorized"));
+        if(!ctx.checkFullAccess(this))
             return;
-		}
-
-        String passwd = request.getPartAsStringFailsafe("formPassword", 32);
-        boolean noPassword = (passwd == null) || !passwd.equals(core.formPassword);
-        if (noPassword) {
-            if (logMINOR) {
-                Logger.minor(this, "No password (" + passwd + " should be " + core.formPassword + ')');
-            }
-        }
 
         if (request.getPartAsStringFailsafe("updateconfirm", 32).length() > 0) {
-            if (noPassword) {
-                redirectToRoot(ctx);
-                return;
-            }
+        	if(!ctx.checkFormPassword(request)) return;
             // false for no navigation bars, because that would be very silly
             PageNode page = ctx.getPageMaker().getPageNode(l10n("updatingTitle"), ctx);
             HTMLNode pageNode = page.outer;
@@ -146,10 +135,7 @@ public class WelcomeToadlet extends Toadlet {
             updateForm.addChild("input", new String[]{"type", "name", "value"}, new String[]{"submit", "updateconfirm", l10n("update")});
             writeHTMLReply(ctx, 200, "OK", pageNode.generate());
 	} else if (request.isPartSet("getThreadDump")) {
-            if (noPassword) {
-                redirectToRoot(ctx);
-                return;
-            }
+    	if(!ctx.checkFormPassword(request)) return;
             PageNode page = ctx.getPageMaker().getPageNode(l10n("threadDumpTitle"), ctx);
             HTMLNode pageNode = page.outer;
             HTMLNode contentNode = page.content;
@@ -164,19 +150,16 @@ public class WelcomeToadlet extends Toadlet {
             }
             this.writeHTMLReply(ctx, 200, "OK", pageNode.generate());
         } else if (request.isPartSet("disable")) {
-            if (noPassword) {
-                redirectToRoot(ctx);
-                return;
-            }
+        	if(!ctx.checkFormPassword(request)) return;
 	    int validAlertsRemaining = 0;
-            UserAlert[] alerts = core.alerts.getAlerts();
+            UserAlert[] alerts = ctx.getAlertManager().getAlerts();
             for (UserAlert alert: alerts) {
                 if (request.getIntPart("disable", -1) == alert.hashCode()) {
                     // Won't be dismissed if it's not allowed anyway
                     if (alert.userCanDismiss() && alert.shouldUnregisterOnDismiss()) {
                         alert.onDismiss();
                         Logger.normal(this, "Unregistering the userAlert " + alert.hashCode());
-                        core.alerts.unregister(alert);
+                        ctx.getAlertManager().unregister(alert);
                     } else {
                         Logger.normal(this, "Disabling the userAlert " + alert.hashCode());
                         alert.isValid(false);
@@ -188,11 +171,9 @@ public class WelcomeToadlet extends Toadlet {
             writePermanentRedirect(ctx, l10n("disabledAlert"), (validAlertsRemaining > 0 ? "/alerts/" : "/"));
             return;
         } else if (request.isPartSet("key") && request.isPartSet("filename")) {
-            if (noPassword) {
-                redirectToRoot(ctx);
-                return;
-            }
-
+        	if(!ctx.checkFormPassword(request)) return;
+        	// FIXME do we still use this? where?
+        	// FIXME If we support it from freesites we need a confirmation page with the formPassword.
             FreenetURI key = new FreenetURI(request.getPartAsStringFailsafe("key", 128));
             String type = request.getPartAsStringFailsafe("content-type", 128);
             if (type == null) {
@@ -254,12 +235,9 @@ public class WelcomeToadlet extends Toadlet {
             writeHTMLReply(ctx, 200, "OK", pageNode.generate());
             return;
         } else if (request.isPartSet("shutdownconfirm")) {
-            if (noPassword) {
-                redirectToRoot(ctx);
-                return;
-            }
+        	if(!ctx.checkFormPassword(request)) return;
             MultiValueTable<String, String> headers = new MultiValueTable<String, String>();
-            headers.put("Location", "/?terminated&formPassword=" + core.formPassword);
+            headers.put("Location", "/?terminated&formPassword=" + ctx.getFormPassword());
             ctx.sendReplyHeaders(302, "Found", headers, null, 0);
             node.ticker.queueTimedJob(new Runnable() {
 
@@ -281,13 +259,9 @@ public class WelcomeToadlet extends Toadlet {
             writeHTMLReply(ctx, 200, "OK", pageNode.generate());
             return;
         } else if (request.isPartSet("restartconfirm")) {
-            if (noPassword) {
-                redirectToRoot(ctx);
-                return;
-            }
-
+        	if(!ctx.checkFormPassword(request)) return;
             MultiValueTable<String, String> headers = new MultiValueTable<String, String>();
-            headers.put("Location", "/?restarted&formPassword=" + core.formPassword);
+            headers.put("Location", "/?restarted&formPassword=" + ctx.getFormPassword());
             ctx.sendReplyHeaders(302, "Found", headers, null, 0);
             node.ticker.queueTimedJob(new Runnable() {
 
@@ -298,16 +272,12 @@ public class WelcomeToadlet extends Toadlet {
                     }, 1);
             return;
         } else if(request.isPartSet("dismiss-events")) {
-		if(noPassword) {
-			redirectToRoot(ctx);
-			return;
-		}
-
+        	if(!ctx.checkFormPassword(request)) return;
         	String alertsToDump = request.getPartAsStringFailsafe("events", Integer.MAX_VALUE);
         	String[] alertAnchors = alertsToDump.split(",");
         	HashSet<String> toDump = new HashSet<String>();
         	for(String alertAnchor : alertAnchors) toDump.add(alertAnchor);
-        	core.alerts.dumpEvents(toDump);
+        	ctx.getAlertManager().dumpEvents(toDump);
         	redirectToRoot(ctx);
         } else {
             redirectToRoot(ctx);
@@ -319,11 +289,11 @@ public class WelcomeToadlet extends Toadlet {
 
             if (request.isParameterSet("latestlog")) {
                 final File logs = new File(node.config.get("logger").getString("dirname") + File.separator + "freenet-latest.log");
-
-                this.writeTextReply(ctx, 200, "OK", FileUtil.readUTF(logs));
+                String text = readLogTail(logs, 100000);
+                this.writeTextReply(ctx, 200, "OK", text);
                 return;
             } else if (request.isParameterSet("terminated")) {
-                if ((!request.isParameterSet("formPassword")) || !request.getParam("formPassword").equals(core.formPassword)) {
+                if ((!request.isParameterSet("formPassword")) || !request.getParam("formPassword").equals(ctx.getFormPassword())) {
                     redirectToRoot(ctx);
                     return;
                 }
@@ -339,7 +309,7 @@ public class WelcomeToadlet extends Toadlet {
                 this.writeHTMLReply(ctx, 200, "OK", pageNode.generate());
                 return;
             } else if (request.isParameterSet("restarted")) {
-                if ((!request.isParameterSet("formPassword")) || !request.getParam("formPassword").equals(core.formPassword)) {
+                if ((!request.isParameterSet("formPassword")) || !request.getParam("formPassword").equals(ctx.getFormPassword())) {
                     redirectToRoot(ctx);
                     return;
                 }
@@ -414,7 +384,7 @@ public class WelcomeToadlet extends Toadlet {
 
         // Alerts
         if (ctx.isAllowedFullAccess()) {
-			contentNode.addChild(core.alerts.createSummary());
+			contentNode.addChild(ctx.getAlertManager().createSummary());
         }
 		
         if (ctx.getPageMaker().getTheme().fetchKeyBoxAboveBookmarks) {
@@ -449,8 +419,8 @@ public class WelcomeToadlet extends Toadlet {
         searchBox.addChild("div", "class", "infobox-header").addChild("span", "class", "search-title-label", NodeL10n.getBase().getString("WelcomeToadlet.searchBoxLabel"));
 		HTMLNode searchBoxContent = searchBox.addChild("div", "class", "infobox-content");
 		// Search form
-		if(core.node.pluginManager != null &&
-				core.node.pluginManager.isPluginLoaded("plugins.Library.Main")) {
+		if(node.pluginManager != null &&
+				node.pluginManager.isPluginLoaded("plugins.Library.Main")) {
         	// FIXME: Remove this once we have a non-broken index.
         	searchBoxContent.addChild("span", "class", "search-warning-text", l10n("searchBoxWarningSlow"));
 			HTMLNode searchForm = container.addFormChild(searchBoxContent, "/library/", "searchform");
@@ -458,8 +428,8 @@ public class WelcomeToadlet extends Toadlet {
         	searchForm.addChild("input", new String[] { "type", "name", "value" }, new String[] { "submit", "find", l10n("searchFreenet") });
         	// Search must be in a new window so that the user is able to browse the bookmarks.
         	searchForm.addAttribute("target", "_blank");
-        } else if(core.node.pluginManager == null || 
-        		core.node.pluginManager.isPluginLoadedOrLoadingOrWantLoad("Library")) {
+        } else if(node.pluginManager == null || 
+        		node.pluginManager.isPluginLoadedOrLoadingOrWantLoad("Library")) {
 			// Warn that search plugin is not loaded.
 			HTMLNode textSpan = searchBoxContent.addChild("span", "class", "search-not-availible-warning");
 			NodeL10n.getBase().addL10nSubstitution(textSpan, "WelcomeToadlet.searchPluginLoading", new String[] { "link" }, new HTMLNode[] { HTMLNode.link("/plugins/") });
@@ -537,14 +507,39 @@ public class WelcomeToadlet extends Toadlet {
         final File logs = new File("wrapper.log");
         long logSize = logs.length();
         if(logs.exists() && logs.isFile() && logs.canRead() && (logSize > 0)) {
+            HTMLNode logInfoboxContent = ctx.getPageMaker().getInfobox("infobox-info", "Current status", contentNode, "start-progress", true);
+            LineReadingInputStream logreader = null;
             try {
-            	HTMLNode logInfoboxContent = ctx.getPageMaker().getInfobox("infobox-info", "Current status", contentNode, "start-progress", true);
-                boolean isShortFile = logSize < 2000;
-                String content = FileUtil.readUTF(logs, (isShortFile ? 0 : logSize - 2000));
-                int eol = content.indexOf('\n');
-                boolean shallStripFirstLine = (!isShortFile) && (eol > 0);
-                logInfoboxContent.addChild("%", content.substring((shallStripFirstLine ? eol + 1 : 0)).replaceAll("\n", "<br>\n"));
+                logreader = FileUtil.getLogTailReader(logs, 2000);
+            	String line;
+            	while ((line = logreader.readLine(100000, 200, true)) != null) {
+            	    logInfoboxContent.addChild("#", line);
+            	    logInfoboxContent.addChild("br");
+            	}
             } catch(IOException e) {}
+            finally {
+                Closer.close(logreader);
+            }
+        }
+    }
+
+    /**
+     * Reads and returns the content of <code>logfile</code>. At most <code>byteLimit</code>
+     * bytes will be read. If <code>byteLimit</code> is less than the size of <code>logfile</code>,
+     * the first part of the file will be skipped. If this leaves a partial line at the beginning
+     * of the content to return, that partial line will also be skipped.
+     * @param logfile The file to read
+     * @param byteLimit The maximum number of bytes to read
+     * @return The trailing portion of the file
+     * @throws IOException if an I/O error occurs
+     */
+    private static String readLogTail(File logfile, long byteLimit) throws IOException {
+        LineReadingInputStream stream = null;
+        try {
+            stream = FileUtil.getLogTailReader(logfile, byteLimit);
+            return FileUtil.readUTF(stream).toString();
+        } finally {
+            Closer.close(stream);
         }
     }
 

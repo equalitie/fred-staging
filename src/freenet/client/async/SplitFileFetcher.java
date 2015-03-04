@@ -180,9 +180,6 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 				container.activate(cb, 1);
 		}
 		cb.onExpectedSize(eventualLength, container, context);
-		String mimeType = metadata.getMIMEType();
-		if(mimeType != null)
-			cb.onExpectedMIME(metadata.getClientMetadata(), container, context);
 		if(metadata.uncompressedDataLength() > 0)
 			cb.onFinalizedMetadata(container);
 		if(!wasActive)
@@ -549,6 +546,9 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 						// Not unusual, if some of the later segments are already finished when cancel() is called.
 						if(logMINOR) Logger.minor(this, "Finished mid-cancel on "+this);
 						return;
+					} else {
+						Logger.error(this, "Segment "+i+" is null on "+this+" but not finished?!");
+						continue;
 					}
 				}
 			}
@@ -617,7 +617,7 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 					new SplitFileFetcherKeyListener(this, keyCount, main, alt, mainBloomFilterSizeBytes, mainBloomK, localSalt, segments.length, perSegmentBloomFilterSizeBytes, perSegmentK, persistent, false, cachedMainBloomFilter, cachedSegmentBloomFilters, container, onStartup, realTimeFlag);
 				if(main != null) {
 					try {
-						FileUtil.secureDelete(main, context.fastWeakRandom);
+						FileUtil.secureDelete(main);
 					} catch (IOException e) {
 						System.err.println("Failed to delete old bloom filter file: "+main+" - this may leak information about a download : "+e);
 						e.printStackTrace();
@@ -625,7 +625,7 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 				}
 				if(alt != null) {
 					try {
-						FileUtil.secureDelete(alt, context.fastWeakRandom);
+						FileUtil.secureDelete(alt);
 					} catch (IOException e) {
 						System.err.println("Failed to delete old segment filters file: "+alt+" - this may leak information about a download : "+e);
 					}
@@ -633,12 +633,12 @@ public class SplitFileFetcher implements ClientGetState, HasKeyListener {
 			} catch (IOException e) {
 				Logger.error(this, "Unable to read Bloom filter for "+this+" attempting to reconstruct...", e);
 				try {
-					FileUtil.secureDelete(main, context.fastWeakRandom);
+					FileUtil.secureDelete(main);
 				} catch (IOException e2) {
 					// Ignore
 				}
 				try {
-					FileUtil.secureDelete(alt, context.fastWeakRandom);
+					FileUtil.secureDelete(alt);
 				} catch (IOException e2) {
 					// Ignore
 				}

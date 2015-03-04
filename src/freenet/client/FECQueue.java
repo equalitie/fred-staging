@@ -21,8 +21,6 @@ import freenet.node.RequestStarter;
 import freenet.support.Executor;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
-import freenet.support.OOMHandler;
-import freenet.support.OOMHook;
 import freenet.support.Logger.LogLevel;
 import freenet.support.api.Bucket;
 import freenet.support.io.NativeThread;
@@ -37,7 +35,7 @@ import freenet.support.io.NativeThread;
  * @author toad
  */
 // WARNING: THIS CLASS IS STORED IN DB4O -- THINK TWICE BEFORE ADD/REMOVE/RENAME FIELDS
-public class FECQueue implements OOMHook {
+public class FECQueue {
 	
 	private transient LinkedList<FECJob>[] transientQueue;
 	private transient LinkedList<FECJob>[] persistentQueueCache;
@@ -120,7 +118,6 @@ public class FECQueue implements OOMHook {
 			persistentQueueCache[i] = new LinkedList<FECJob>();
 		}
 		maxRunningFECThreads = getMaxRunningFECThreads();
-		OOMHandler.addOOMHook(this);
 		initRunner();
 		initCacheFillerJob();
 		queueCacheFiller();
@@ -344,7 +341,7 @@ public class FECQueue implements OOMHook {
 									// It MUST already be activated, because it is carrying the status blocks.
 									// The status blocks have been set on the FEC thread but *not stored* because
 									// they can't be stored on the FEC thread.
-									Logger.minor(this, "Activating "+job.callback+" is active="+container.ext().isActive(job.callback));
+									if(logMINOR) Logger.minor(this, "Activating "+job.callback+" is active="+container.ext().isActive(job.callback));
 									container.activate(job.callback, 1);
 									if(logMINOR)
 										Logger.minor(this, "Running callback for "+job);
@@ -572,18 +569,6 @@ public class FECQueue implements OOMHook {
 		}
 	}
 
-	@Override
-	public synchronized void handleLowMemory() throws Exception {
-		maxRunningFECThreads = Math.max(1, maxRunningFECThreads - 1);
-		notify(); // not notifyAll()
-	}
-
-	@Override
-	public synchronized void handleOutOfMemory() throws Exception {
-		maxRunningFECThreads = 1;
-		notifyAll();
-	}
-	
 	public void objectOnDeactivate(ObjectContainer container) {
 		Logger.error(this, "Attempting to deactivate FECQueue!", new Exception("debug"));
 	}

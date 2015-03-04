@@ -3,6 +3,9 @@
  * http://www.gnu.org/ for further details of the GPL. */
 package freenet.node.updater;
 
+import static java.util.concurrent.TimeUnit.HOURS;
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import java.io.BufferedInputStream;
 import java.io.DataInputStream;
 import java.io.EOFException;
@@ -17,6 +20,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.WeakHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -107,9 +111,9 @@ public class UpdateOverMandatoryManager implements RequestClient {
 	// 2 for reliability, no more as gets very slow/wasteful
 	static final int MAX_NODES_SENDING_JAR = 2;
 	/** Maximum time between asking for the main jar and it starting to transfer */
-	static final int REQUEST_MAIN_JAR_TIMEOUT = 60 * 1000;
+	static final long REQUEST_MAIN_JAR_TIMEOUT = SECONDS.toMillis(60);
 	//** Grace time before we use UoM to update */
-	public static final int GRACE_TIME = 3 * 60 * 60 * 1000; // 3h
+	public static final long GRACE_TIME = HOURS.toMillis(3);
 	private UserAlert alert;
 	private static final Pattern mainBuildNumberPattern = Pattern.compile("^main(?:-jar)?-(\\d+)\\.fblob$");
 	private static final Pattern mainTempBuildNumberPattern = Pattern.compile("^main(?:-jar)?-(\\d+-)?(\\d+)\\.fblob\\.tmp*$");
@@ -253,8 +257,10 @@ public class UpdateOverMandatoryManager implements RequestClient {
 		synchronized(dependencyFetchers) {
 			fetchList = new HashSet<UOMDependencyFetcher>(dependencyFetchers.values());
 		}
-		for(UOMDependencyFetcher f : fetchList)
+		for(UOMDependencyFetcher f : fetchList) {
+		    if(source.isDarknet()) f.peerMaybeFreeSlots(source);
 			f.start();
+		}
 	}
 
 	private void tryFetchRevocation(final PeerNode source) throws NotConnectedException {
@@ -304,8 +310,8 @@ public class UpdateOverMandatoryManager implements RequestClient {
 				System.err.println("Peer "+source+" (build #" + source.getSimpleVersion() + ") said that the auto-update key had been blown, but did not transfer the revocation certificate. The most likely explanation is that the key has not been blown (the node is buggy or malicious), so we are ignoring this.");
 				maybeNotRevoked();
 			}
-			
-		}, 60*1000);
+
+		}, SECONDS.toMillis(60));
 
 	// The reply message will start the transfer. It includes the revocation URI
 	// so we can tell if anything wierd is happening.
@@ -345,6 +351,7 @@ public class UpdateOverMandatoryManager implements RequestClient {
 					if(mainJarURI.equals(updateManager.getURI().setSuggestedEdition(mainJarVersion)))
 						sendUOMRequest(source, true);
 					else
+					    // FIXME don't log if it's the transitional version.
 						System.err.println("Node " + source.userToString() + " offered us a new main jar (version " + mainJarVersion + ") but his key was different to ours:\n" +
 							"our key: " + updateManager.getURI() + "\nhis key:" + mainJarURI);
 				} catch(MalformedURLException e) {
@@ -1048,10 +1055,13 @@ public class UpdateOverMandatoryManager implements RequestClient {
 						temp.free();
 
 					insertBlob(updateManager.revocationChecker.getBlobBucket(), "revocation");
-
 				} else {
-					Logger.error(this, "Failed to fetch revocation certificate from blob from " + source + " : "+e+" : this is almost certainly bogus i.e. the auto-update is fine but the node is broken.");
-					System.err.println("Failed to fetch revocation certificate from blob from " + source + " : "+e+" : this is almost certainly bogus i.e. the auto-update is fine but the node is broken.");
+					String message = "Failed to fetch revocation certificate from blob from " +
+						source + " : "+e+
+						(fromDisk ? " : did you change the revocation key?" : 
+							" : this is almost certainly bogus i.e. the auto-update is fine but the node is broken.");
+					Logger.error(this, message);
+					System.err.println(message);
 					// This is almost certainly bogus.
 					// Delete it, even if it's fromDisk.
 					temp.free();
@@ -1401,6 +1411,7 @@ public class UpdateOverMandatoryManager implements RequestClient {
 					else {
 						Logger.error(this, "Failed to transfer main jar " + version + " from " + source);
 						System.err.println("Failed to transfer main jar " + version + " from " + source);
+						temp.delete();
 					}
 				} finally {
 					synchronized(UpdateOverMandatoryManager.class) {
@@ -1770,9 +1781,9 @@ public class UpdateOverMandatoryManager implements RequestClient {
 	 * successful and the hash is correct.
 	 * @param uomDependencyFetchCallback Callback to call when done.
 	 */
-	public UOMDependencyFetcher fetchDependency(byte[] expectedHash, long size, File saveTo,
-			UOMDependencyFetcherCallback cb) {
-		final UOMDependencyFetcher f = new UOMDependencyFetcher(expectedHash, size, saveTo, cb);
+	public UOMDependencyFetcher fetchDependency(byte[] expectedHash, long size, File saveTo, 
+	        boolean executable, UOMDependencyFetcherCallback cb) {
+		final UOMDependencyFetcher f = new UOMDependencyFetcher(expectedHash, size, saveTo, executable, cb);
 		synchronized(this) {
 			dependencyFetchers.put(f.expectedHashBuffer, f);
 		}
@@ -1817,15 +1828,17 @@ public class UpdateOverMandatoryManager implements RequestClient {
 		final ShortBuffer expectedHashBuffer;
 		final long size;
 		final File saveTo;
+		final boolean executable;
 		private boolean completed;
 		private final UOMDependencyFetcherCallback cb;
 		private final WeakHashSet<PeerNode> peersFailed;
 		private final HashSet<PeerNode> peersFetching;
 		
-		private UOMDependencyFetcher(byte[] expectedHash, long size, File saveTo, UOMDependencyFetcherCallback callback) {
+		private UOMDependencyFetcher(byte[] expectedHash, long size, File saveTo, boolean executable, UOMDependencyFetcherCallback callback) {
 			this.expectedHash = expectedHash;
 			expectedHashBuffer = new ShortBuffer(expectedHash);
 			this.size = size;
+			this.executable = executable;
 			this.saveTo = saveTo;
 			cb = callback;
 			peersFailed = new WeakHashSet<PeerNode>();
@@ -1909,7 +1922,7 @@ public class UpdateOverMandatoryManager implements RequestClient {
 						raf = null;
 						if(!failed) {
 							// Check the hash.
-							if(MainJarDependenciesChecker.validFile(tmp, expectedHash, size)) {
+							if(MainJarDependenciesChecker.validFile(tmp, expectedHash, size, executable)) {
 								if(FileUtil.renameTo(tmp, saveTo)) {
 									synchronized(UOMDependencyFetcher.this) {
 										if(completed) return;
@@ -1966,8 +1979,21 @@ public class UpdateOverMandatoryManager implements RequestClient {
 						Closer.close(raf);
 						if(tmp != null) 
 							tmp.delete();
-						if(failed)
+						if(failed) {
 							start();
+							if(fetchFrom.isConnected() && fetchFrom.isDarknet()) {
+							    // Darknet peers only: Try again in an hour.
+							    // On opennet we'll just keep announcing until we succeed.
+							    updateManager.node.getTicker().queueTimedJob(new Runnable() {
+
+                                    @Override
+                                    public void run() {
+                                        peerMaybeFreeSlots(fetchFrom);
+                                    }
+							        
+							    }, TimeUnit.HOURS.toMillis(1));
+							}
+						}
 					}
 				}
 				

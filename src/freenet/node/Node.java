@@ -11,6 +11,10 @@ import static freenet.node.stats.DataStoreType.CACHE;
 import static freenet.node.stats.DataStoreType.CLIENT;
 import static freenet.node.stats.DataStoreType.SLASHDOT;
 import static freenet.node.stats.DataStoreType.STORE;
+import static java.util.concurrent.TimeUnit.DAYS;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 import java.io.BufferedReader;
 import java.io.EOFException;
@@ -34,6 +38,8 @@ import java.util.MissingResourceException;
 import java.util.Random;
 import java.util.Set;
 
+import freenet.node.useralerts.JVMVersionAlert;
+import freenet.support.JVMVersion;
 import org.tanukisoftware.wrapper.WrapperManager;
 
 import com.db4o.Db4o;
@@ -128,6 +134,7 @@ import freenet.pluginmanager.PluginManager;
 import freenet.pluginmanager.PluginStore;
 import freenet.store.BlockMetadata;
 import freenet.store.CHKStore;
+import freenet.store.CachingFreenetStore;
 import freenet.store.FreenetStore;
 import freenet.store.KeyCollisionException;
 import freenet.store.NullFreenetStore;
@@ -146,7 +153,6 @@ import freenet.support.HexUtil;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.Logger.LogLevel;
-import freenet.support.OOMHandler;
 import freenet.support.PooledExecutor;
 import freenet.support.PrioritizedTicker;
 import freenet.support.ShortBuffer;
@@ -387,58 +393,58 @@ public class Node implements TimeSkewDetectorCallback {
 			if (!found)
 				throw new InvalidConfigValueException("Invalid store type");
 
-				synchronized(this) { // Serialise this part.
-					String suffix = getStoreSuffix();
-					if (val.equals("salt-hash")) {
-						byte[] key;
-						synchronized(Node.this) {
-							key = cachedClientCacheKey;
-							cachedClientCacheKey = null;
-						}
-						if(key == null) {
-							MasterKeys keys = null;
-							try {
-								if(securityLevels.physicalThreatLevel == PHYSICAL_THREAT_LEVEL.MAXIMUM) {
-									key = new byte[32];
-									random.nextBytes(key);
-								} else {
-									keys = MasterKeys.read(masterKeysFile, random, "");
-									key = keys.clientCacheMasterKey;
-									keys.clearAllNotClientCacheKey();
-								}
-							} catch (MasterKeysWrongPasswordException e1) {
-								setClientCacheAwaitingPassword();
-								synchronized(Node.this) {
-									clientCacheType = val;
-								}
-								throw new InvalidConfigValueException("You must enter the password");
-							} catch (MasterKeysFileSizeException e1) {
-								throw new InvalidConfigValueException("Master keys file corrupted (too " + e1.sizeToString() + ")");
-							} catch (IOException e1) {
-								throw new InvalidConfigValueException("Master keys file cannot be accessed: "+e1);
-							}
-						}
-						try {
-							initSaltHashClientCacheFS(suffix, true, key);
-						} catch (NodeInitException e) {
-							Logger.error(this, "Unable to create new store", e);
-							System.err.println("Unable to create new store: "+e);
-							e.printStackTrace();
-							// FIXME l10n both on the NodeInitException and the wrapper message
-							throw new InvalidConfigValueException("Unable to create new store: "+e);
-						} finally {
-							MasterKeys.clear(key);
-						}
-					} else if(val.equals("ram")) {
-						initRAMClientCacheFS();
-					} else /*if(val.equals("none")) */{
-						initNoClientCacheFS();
-					}
-
+			synchronized(this) { // Serialise this part.
+				String suffix = getStoreSuffix();
+				if (val.equals("salt-hash")) {
+					byte[] key;
 					synchronized(Node.this) {
-						clientCacheType = val;
+						key = cachedClientCacheKey;
+						cachedClientCacheKey = null;
 					}
+					if(key == null) {
+						MasterKeys keys = null;
+						try {
+							if(securityLevels.physicalThreatLevel == PHYSICAL_THREAT_LEVEL.MAXIMUM) {
+								key = new byte[32];
+								random.nextBytes(key);
+							} else {
+								keys = MasterKeys.read(masterKeysFile, random, "");
+								key = keys.clientCacheMasterKey;
+								keys.clearAllNotClientCacheKey();
+							}
+						} catch (MasterKeysWrongPasswordException e1) {
+							setClientCacheAwaitingPassword();
+							synchronized(Node.this) {
+								clientCacheType = val;
+							}
+							throw new InvalidConfigValueException("You must enter the password");
+						} catch (MasterKeysFileSizeException e1) {
+							throw new InvalidConfigValueException("Master keys file corrupted (too " + e1.sizeToString() + ")");
+						} catch (IOException e1) {
+							throw new InvalidConfigValueException("Master keys file cannot be accessed: "+e1);
+						}
+					}
+					try {
+						initSaltHashClientCacheFS(suffix, true, key);
+					} catch (NodeInitException e) {
+						Logger.error(this, "Unable to create new store", e);
+						System.err.println("Unable to create new store: "+e);
+						e.printStackTrace();
+						// FIXME l10n both on the NodeInitException and the wrapper message
+						throw new InvalidConfigValueException("Unable to create new store: "+e);
+					} finally {
+						MasterKeys.clear(key);
+					}
+				} else if(val.equals("ram")) {
+					initRAMClientCacheFS();
+				} else /*if(val.equals("none")) */{
+					initNoClientCacheFS();
 				}
+				
+				synchronized(Node.this) {
+					clientCacheType = val;
+				}
+			}
 		}
 
 		@Override
@@ -485,6 +491,7 @@ public class Node implements TimeSkewDetectorCallback {
 	public long nodeDBHandle;
 
 	private boolean autoChangeDatabaseEncryption = true;
+	private DatabaseKey databaseKey;
 
 	/** Stats */
 	public final NodeStats nodeStats;
@@ -510,12 +517,12 @@ public class Node implements TimeSkewDetectorCallback {
 	// timeout. Most nodes don't need to send keepalives because they are constantly busy,
 	// this is only an issue for disabled darknet connections, very quiet private networks
 	// etc.
-	public static final int KEEPALIVE_INTERVAL = 7000;
+	public static final long KEEPALIVE_INTERVAL = SECONDS.toMillis(7);
 	// If no activity for 30 seconds, node is dead
 	// 35 seconds allows plenty of time for resends etc even if above is 14 sec as it is on older nodes.
-	public static final int MAX_PEER_INACTIVITY = 35000;
+	public static final long MAX_PEER_INACTIVITY = SECONDS.toMillis(35);
 	/** Time after which a handshake is assumed to have failed. */
-	public static final int HANDSHAKE_TIMEOUT = 4800; // Keep the below within the 30 second assumed timeout.
+	public static final int HANDSHAKE_TIMEOUT = (int) MILLISECONDS.toMillis(4800); // Keep the below within the 30 second assumed timeout.
 	// Inter-handshake time must be at least 2x handshake timeout
 	public static final int MIN_TIME_BETWEEN_HANDSHAKE_SENDS = HANDSHAKE_TIMEOUT*2; // 10-20 secs
 	public static final int RANDOMIZED_TIME_BETWEEN_HANDSHAKE_SENDS = HANDSHAKE_TIMEOUT*2; // avoid overlap when the two handshakes are at the same time
@@ -528,11 +535,10 @@ public class Node implements TimeSkewDetectorCallback {
 	public static final int MIN_BURSTING_HANDSHAKE_BURST_SIZE = 1; // 1-4 handshake sends per burst
 	public static final int RANDOMIZED_BURSTING_HANDSHAKE_BURST_SIZE = 3;
 	// If we don't receive any packets at all in this period, from any node, tell the user
-	public static final long ALARM_TIME = 60*1000;
+	public static final long ALARM_TIME = MINUTES.toMillis(1);
 
-	// 900ms
-	static final int MIN_INTERVAL_BETWEEN_INCOMING_SWAP_REQUESTS = 900;
-	static final int MIN_INTERVAL_BETWEEN_INCOMING_PROBE_REQUESTS = 1000;
+	static final long MIN_INTERVAL_BETWEEN_INCOMING_SWAP_REQUESTS = MILLISECONDS.toMillis(900);
+	static final long MIN_INTERVAL_BETWEEN_INCOMING_PROBE_REQUESTS = MILLISECONDS.toMillis(1000);
 	public static final int SYMMETRIC_KEY_LENGTH = 32; // 256 bits - note that this isn't used everywhere to determine it
 
 	/** Datastore directory */
@@ -606,7 +612,7 @@ public class Node implements TimeSkewDetectorCallback {
 	// FIXME make the first two configurable
 	private long maxSlashdotCacheSize;
 	private int maxSlashdotCacheKeys;
-	static final long PURGE_INTERVAL = 60*1000;
+	static final long PURGE_INTERVAL = SECONDS.toMillis(60);
 
 	private CHKStore chkSlashdotcache;
 	private SlashdotStore<CHKBlock> chkSlashdotcacheStore;
@@ -730,7 +736,7 @@ public class Node implements TimeSkewDetectorCallback {
 	/** Should inserts ignore low backoff times by default? */
 	public static final boolean IGNORE_LOW_BACKOFF_DEFAULT = false;
 	/** Definition of "low backoff times" for above. */
-	public static final int LOW_BACKOFF = 30*1000;
+	public static final long LOW_BACKOFF = SECONDS.toMillis(30);
 	/** Should inserts be fairly blatently prioritised on accept by default? */
 	public static final boolean PREFER_INSERT_DEFAULT = false;
 	/** Should inserts fork when the HTL reaches cacheability? */
@@ -1009,7 +1015,7 @@ public class Node implements TimeSkewDetectorCallback {
 		this.shutdownHook = SemiOrderedShutdownHook.get();
 		// Easy stuff
 		String tmp = "Initializing Node using Freenet Build #"+Version.buildNumber()+" r"+Version.cvsRevision()+" and freenet-ext Build #"+NodeStarter.extBuildNumber+" r"+NodeStarter.extRevisionNumber+" with "+System.getProperty("java.vendor")+" JVM version "+System.getProperty("java.version")+" running on "+System.getProperty("os.arch")+' '+System.getProperty("os.name")+' '+System.getProperty("os.version");
-		fixCertsFile();
+		fixCertsFiles();
 		Logger.normal(this, tmp);
 		System.out.println(tmp);
 		collector = new IOStatisticCollector();
@@ -1105,6 +1111,12 @@ public class Node implements TimeSkewDetectorCallback {
 					return;
 				System.out.println("Not enough entropy available.");
 				System.out.println("Trying to gather entropy (randomness) by reading the disk...");
+				if(File.separatorChar == '/') {
+					if(new File("/dev/hwrng").exists())
+						System.out.println("/dev/hwrng exists - have you installed rng-tools?");
+					else
+						System.out.println("You should consider installing a better random number generator e.g. haveged.");
+				}
 				extendTimeouts();
 				for(File root : File.listRoots()) {
 					if(isPRNGReady)
@@ -1113,7 +1125,9 @@ public class Node implements TimeSkewDetectorCallback {
 				}
 			}
 			
-			static final int EXTEND_BY = 10*60*1000;
+			/** This is ridiculous, but for some users it can take more than an hour, and timing out sucks
+			 * a few bytes and then times out again. :( */
+			static final int EXTEND_BY = 60*60*1000;
 			
 			private void extendTimeouts() {
 				long now = System.currentTimeMillis();
@@ -1150,7 +1164,7 @@ public class Node implements TimeSkewDetectorCallback {
 			// if it's not null it's because we are running in the simulator
 		}
 		// This can block too.
-		this.secureRandom = new SecureRandom();
+		this.secureRandom = NodeStarter.getGlobalSecureRandom();
 		isPRNGReady = true;
 		toadlets.getStartupToadlet().setIsPRNGReady();
 		if(weakRandom == null) {
@@ -1218,7 +1232,6 @@ public class Node implements TimeSkewDetectorCallback {
 			f = null;
 		} else {
 			f = new File(value);
-			if (!f.isAbsolute()) { f = userDir.file(value); }
 
 			if(f.exists() && !(f.canWrite() && f.canRead()))
 				throw new NodeInitException(NodeInitException.EXIT_CANT_WRITE_MASTER_KEYS, "Cannot read from and write to master keys file "+f);
@@ -1248,7 +1261,7 @@ public class Node implements TimeSkewDetectorCallback {
 				db.close();
 				if(securityLevels.getPhysicalThreatLevel() == PHYSICAL_THREAT_LEVEL.MAXIMUM) {
 					try {
-						FileUtil.secureDelete(dbFileCrypt, random);
+						FileUtil.secureDelete(dbFileCrypt);
 					} catch (IOException e) {
 						// Ignore
 					} finally {
@@ -1629,30 +1642,34 @@ public class Node implements TimeSkewDetectorCallback {
 		// Bandwidth limit
 
 		nodeConfig.register("outputBandwidthLimit", "15K", sortOrder++, false, true, "Node.outBWLimit", "Node.outBWLimitLong", new IntCallback() {
-					@Override
-					public Integer get() {
-						//return BlockTransmitter.getHardBandwidthLimit();
-						return outputBandwidthLimit;
-					}
-					@Override
-					public void set(Integer obwLimit) throws InvalidConfigValueException {
-						if(obwLimit <= 0) throw new InvalidConfigValueException(l10n("bwlimitMustBePositive"));
-						if (obwLimit < minimumBandwidth) throw lowBandwidthLimit(obwLimit);
-						synchronized(Node.this) {
-							outputBandwidthLimit = obwLimit;
-						}
-						outputThrottle.changeNanosAndBucketSize((1000L * 1000L * 1000L) / obwLimit, obwLimit/2);
-						nodeStats.setOutputLimit(obwLimit);
-					}
+			@Override
+			public Integer get() {
+				//return BlockTransmitter.getHardBandwidthLimit();
+				return outputBandwidthLimit;
+			}
+			@Override
+			public void set(Integer obwLimit) throws InvalidConfigValueException {
+				checkOutputBandwidthLimit(obwLimit);
+				try {
+					outputThrottle.changeNanosAndBucketSize(SECONDS.toNanos(1) / obwLimit, obwLimit/2);
+					nodeStats.setOutputLimit(obwLimit);
+				} catch (IllegalArgumentException e) {
+					throw new InvalidConfigValueException(e);
+				}
+				synchronized(Node.this) {
+					outputBandwidthLimit = obwLimit;
+				}
+			}
 		});
 
 		int obwLimit = nodeConfig.getInt("outputBandwidthLimit");
-		if(obwLimit <= 0)
-			throw new NodeInitException(NodeInitException.EXIT_BAD_BWLIMIT, "Invalid outputBandwidthLimit");
-		if (obwLimit < minimumBandwidth) {
-			throw new NodeInitException(NodeInitException.EXIT_BAD_BWLIMIT, lowBandwidthLimit(obwLimit).getMessage());
-		}
 		outputBandwidthLimit = obwLimit;
+		try {
+			checkOutputBandwidthLimit(outputBandwidthLimit);
+		} catch (InvalidConfigValueException e) {
+			throw new NodeInitException(NodeInitException.EXIT_BAD_BWLIMIT, e.getMessage());
+		}
+
 		// Bucket size of 0.5 seconds' worth of bytes.
 		// Add them at a rate determined by the obwLimit.
 		// Maximum forced bytes 80%, in other words, 20% of the bandwidth is reserved for
@@ -1661,41 +1678,52 @@ public class Node implements TimeSkewDetectorCallback {
 		// Must have at least space for ONE PACKET.
 		// FIXME: make compatible with alternate transports.
 		bucketSize = Math.max(bucketSize, 2048);
-		outputThrottle = new TokenBucket(bucketSize, (1000L*1000L*1000L) / obwLimit, obwLimit/2);
+		try {
+		outputThrottle = new TokenBucket(bucketSize, SECONDS.toNanos(1) / obwLimit, obwLimit/2);
+		} catch (IllegalArgumentException e) {
+			throw new NodeInitException(NodeInitException.EXIT_BAD_BWLIMIT, e.getMessage());
+		}
 
 		nodeConfig.register("inputBandwidthLimit", "-1", sortOrder++, false, true, "Node.inBWLimit", "Node.inBWLimitLong",	new IntCallback() {
-					@Override
-					public Integer get() {
-						if(inputLimitDefault) return -1;
-						return inputBandwidthLimit;
+			@Override
+			public Integer get() {
+				if(inputLimitDefault) return -1;
+				return inputBandwidthLimit;
+			}
+			@Override
+			public void set(Integer ibwLimit) throws InvalidConfigValueException {
+				synchronized(Node.this) {
+					checkInputBandwidthLimit(ibwLimit);
+
+					if(ibwLimit == -1) {
+						inputLimitDefault = true;
+						ibwLimit = outputBandwidthLimit * 4;
+					} else {
+						inputLimitDefault = false;
 					}
-					@Override
-					public void set(Integer ibwLimit) throws InvalidConfigValueException {
-						synchronized(Node.this) {
-							if(ibwLimit == -1) {
-								inputLimitDefault = true;
-								ibwLimit = outputBandwidthLimit * 4;
-							} else {
-								if(ibwLimit <= 1) throw new InvalidConfigValueException(l10n("bandwidthLimitMustBePositiveOrMinusOne"));
-								if (ibwLimit < minimumBandwidth) throw lowBandwidthLimit(ibwLimit);
-								inputLimitDefault = false;
-							}
-							inputBandwidthLimit = ibwLimit;
-						}
+
+					try {
 						nodeStats.setInputLimit(ibwLimit);
+					} catch (IllegalArgumentException e) {
+						throw new InvalidConfigValueException(e);
 					}
+
+					inputBandwidthLimit = ibwLimit;
+				}
+			}
 		});
 
 		int ibwLimit = nodeConfig.getInt("inputBandwidthLimit");
 		if(ibwLimit == -1) {
 			inputLimitDefault = true;
 			ibwLimit = obwLimit * 4;
-		} else if(ibwLimit <= 0)
-			throw new NodeInitException(NodeInitException.EXIT_BAD_BWLIMIT, "Invalid inputBandwidthLimit");
-		if (ibwLimit < minimumBandwidth) {
-			throw new NodeInitException(NodeInitException.EXIT_BAD_BWLIMIT, lowBandwidthLimit(ibwLimit).getMessage());
 		}
 		inputBandwidthLimit = ibwLimit;
+		try {
+			checkInputBandwidthLimit(inputBandwidthLimit);
+		} catch (InvalidConfigValueException e) {
+			throw new NodeInitException(NodeInitException.EXIT_BAD_BWLIMIT, e.getMessage());
+		}
 
 		nodeConfig.register("throttleLocalTraffic", false, sortOrder++, true, false, "Node.throttleLocalTraffic", "Node.throttleLocalTrafficLong", new BooleanCallback() {
 
@@ -1746,8 +1774,6 @@ public class Node implements TimeSkewDetectorCallback {
 
 		// Then read the peers
 		peers = new PeerManager(this, shutdownHook);
-		peers.tryReadPeers(nodeDir.file("peers-"+getDarknetPortNumber()).getPath(), darknetCrypto, null, false, false);
-		peers.updatePMUserAlert();
 		
 		tracker = new RequestTracker(peers, ticker);
 
@@ -1763,6 +1789,11 @@ public class Node implements TimeSkewDetectorCallback {
 
 		// clientCore needs new load management and other settings from stats.
 		clientCore = new NodeClientCore(this, config, nodeConfig, installConfig, getDarknetPortNumber(), sortOrder, oldConfig, fproxyConfig, toadlets, nodeDBHandle, db);
+		toadlets.setCore(clientCore);
+
+		if (JVMVersion.isTooOld()) {
+			clientCore.alerts.register(new JVMVersionAlert());
+		}
 
 		if(showFriendsVisibilityAlert)
 			registerFriendsVisibilityAlert();
@@ -1839,7 +1870,7 @@ public class Node implements TimeSkewDetectorCallback {
 					@Override
 					public void set(Integer inputMaxOpennetPeers) throws InvalidConfigValueException {
 						if(inputMaxOpennetPeers < 0) throw new InvalidConfigValueException(l10n("mustBePositive"));
-						if(inputMaxOpennetPeers > OpennetManager.MAX_PEERS_FOR_SCALING) throw new InvalidConfigValueException(l10n("maxOpennetPeersMustBeTwentyOrLess"));
+						if(inputMaxOpennetPeers > OpennetManager.MAX_PEERS_FOR_SCALING) throw new InvalidConfigValueException(l10n("maxOpennetPeersMustBeTwentyOrLess", "maxpeers", Integer.toString(OpennetManager.MAX_PEERS_FOR_SCALING)));
 						maxOpennetPeers = inputMaxOpennetPeers;
 						}
 					}
@@ -2095,6 +2126,7 @@ public class Node implements TimeSkewDetectorCallback {
 		storeSaltHashResizeOnStart = nodeConfig.getBoolean("storeSaltHashResizeOnStart");
 
 		this.storeDir = setupProgramDir(installConfig, "storeDir", userDir().file("datastore").getPath(), "Node.storeDirectory", "Node.storeDirectoryLong", nodeConfig);
+		installConfig.finishedInitialization();
 
 		final String suffix = getStoreSuffix();
 
@@ -2192,6 +2224,64 @@ public class Node implements TimeSkewDetectorCallback {
 			}
 		}
 		
+		long defaultCacheSize;
+		long memoryLimit = NodeStarter.getMemoryLimitBytes();
+		// This is tricky because systems with low memory probably also have slow disks, but using 
+		// up too much memory can be catastrophic...
+		// Total alchemy, FIXME!
+		if(memoryLimit == Long.MAX_VALUE || memoryLimit < 0)
+			defaultCacheSize = 1024*1024;
+		else if(memoryLimit <= 128*1024*1024)
+			defaultCacheSize = 0; // Turn off completely for very small memory.
+		else {
+			// 9 stores, total should be 5% of memory, up to maximum of 1MB per store at 308MB+
+			defaultCacheSize = Math.min(1024*1024, (memoryLimit - 128*1024*1024) / (20*9));
+		}
+		
+		nodeConfig.register("cachingFreenetStoreMaxSize", defaultCacheSize, sortOrder++, true, false, "Node.cachingFreenetStoreMaxSize", "Node.cachingFreenetStoreMaxSizeLong",
+			new LongCallback() {
+				@Override
+				public Long get() {
+					synchronized(Node.this) {
+						return cachingFreenetStoreMaxSize;
+					}
+				}
+
+				@Override
+				public void set(Long val) throws InvalidConfigValueException, NodeNeedRestartException {
+					if(val < 0) throw new InvalidConfigValueException(l10n("invalidMemoryCacheSize"));
+					// Any positive value is legal. In particular, e.g. 1200 bytes would cause us to cache SSKs but not CHKs.
+					synchronized(Node.this) {
+						cachingFreenetStoreMaxSize = val;
+					}
+					throw new NodeNeedRestartException("Caching Maximum Size cannot be changed on the fly");
+				}
+		}, true);
+		
+		cachingFreenetStoreMaxSize = nodeConfig.getLong("cachingFreenetStoreMaxSize");
+		if(cachingFreenetStoreMaxSize < 0)
+			throw new NodeInitException(NodeInitException.EXIT_BAD_CONFIG, l10n("invalidMemoryCacheSize"));
+		
+		nodeConfig.register("cachingFreenetStorePeriod", "300k", sortOrder++, true, false, "Node.cachingFreenetStorePeriod", "Node.cachingFreenetStorePeriod",
+			new LongCallback() {
+				@Override
+				public Long get() {
+					synchronized(Node.this) {
+						return cachingFreenetStorePeriod;
+					}
+				}
+
+				@Override
+				public void set(Long val) throws InvalidConfigValueException, NodeNeedRestartException {
+					synchronized(Node.this) {
+						cachingFreenetStorePeriod = val;
+					}
+					throw new NodeNeedRestartException("Caching Period cannot be changed on the fly");
+				}
+		}, true);
+		
+		cachingFreenetStorePeriod = nodeConfig.getLong("cachingFreenetStorePeriod");
+
 		boolean shouldWriteConfig = false;
 
 		if(storeType.equals("bdb-index")) {
@@ -2286,7 +2376,7 @@ public class Node implements TimeSkewDetectorCallback {
 
 		boolean startedClientCache = false;
 
-		byte[] databaseKey = null;
+		DatabaseKey key = null;
 		MasterKeys keys = null;
 
 		for(int i=0;i<2 && !startedClientCache; i++) {
@@ -2303,7 +2393,10 @@ public class Node implements TimeSkewDetectorCallback {
 					if(securityLevels.getPhysicalThreatLevel() == PHYSICAL_THREAT_LEVEL.HIGH) {
 						System.err.println("Physical threat level is set to HIGH but no password, resetting to NORMAL - probably timing glitch");
 						securityLevels.resetPhysicalThreatLevel(PHYSICAL_THREAT_LEVEL.NORMAL);
-						databaseKey = keys.databaseKey;
+						key = keys.createDatabaseKey(random);
+						synchronized(this) {
+						    databaseKey = key;
+						}
 						shouldWriteConfig = true;
 					} else {
 						keys.clearAllNotClientCacheKey();
@@ -2409,7 +2502,7 @@ public class Node implements TimeSkewDetectorCallback {
 
 		});
 
-		nodeConfig.register("slashdotCacheLifetime", 30*60*1000L, sortOrder++, true, false, "Node.slashdotCacheLifetime", "Node.slashdotCacheLifetimeLong", new LongCallback() {
+		nodeConfig.register("slashdotCacheLifetime", MINUTES.toMillis(30), sortOrder++, true, false, "Node.slashdotCacheLifetime", "Node.slashdotCacheLifetimeLong", new LongCallback() {
 
 			@Override
 			public Long get() {
@@ -2551,7 +2644,7 @@ public class Node implements TimeSkewDetectorCallback {
 		enableRoutedPing = nodeConfig.getBoolean("enableRoutedPing");
 		
 		updateMTU();
-
+		
 		/* Take care that no configuration options are registered after this point; they will not persist
 		 * between restarts.
 		 */
@@ -2567,7 +2660,7 @@ public class Node implements TimeSkewDetectorCallback {
 		shutdownHook.addEarlyJob(new NativeThread("Shutdown plugins", NativeThread.HIGH_PRIORITY, true) {
 			@Override
 			public void realRun() {
-				pluginManager.stop(30*1000); // FIXME make it configurable??
+				pluginManager.stop(SECONDS.toMillis(30)); // FIXME make it configurable??
 			}
 		});
 
@@ -2578,7 +2671,7 @@ public class Node implements TimeSkewDetectorCallback {
 		// it's likely (on reports so far) that a restart will fix it.
 		// And we have to get a build out because ALL plugins are now failing to load,
 		// including the absolutely essential (for most nodes) JSTUN and UPnP.
-		WrapperManager.signalStarting(120*1000);
+		WrapperManager.signalStarting((int) MINUTES.toMillis(2));
 
 		FetchContext ctx = clientCore.makeClient((short)0, true, false).getFetchContext();
 
@@ -2609,7 +2702,7 @@ public class Node implements TimeSkewDetectorCallback {
 		System.out.println("Node constructor completed");
 	}
 
-	/** Delete files from old BDB-index datastore. */
+    /** Delete files from old BDB-index datastore. */
 	private void deleteOldBDBIndexStoreFiles() {
 		File dbDir = storeDir.file("database-"+getDarknetPortNumber());
 		FileUtil.removeAll(dbDir);
@@ -2621,7 +2714,7 @@ public class Node implements TimeSkewDetectorCallback {
 					name.toLowerCase().matches("((chk)|(ssk)|(pubkey))-[0-9]*\\.((store)|(cache))(\\.((keys)|(lru)))?")) {
 				System.out.println("Deleting old datastore file \""+f+"\"");
 				try {
-					FileUtil.secureDelete(f, fastWeakRandom, true);
+					FileUtil.secureDelete(f);
 				} catch (IOException e) {
 					System.err.println("Failed to delete old datastore file \""+f+"\": "+e);
 					e.printStackTrace();
@@ -2630,41 +2723,47 @@ public class Node implements TimeSkewDetectorCallback {
 		}
 	}
 
-
-	private void fixCertsFile() {
+	private void fixCertsFiles() {
 		// Hack to update certificates file to fix update.cmd
+		// startssl.pem: Might be useful for old versions of update.sh too?
 		File certs = new File(PluginDownLoaderOfficialHTTPS.certfileOld);
-		if(certs.exists()) {
-			long oldLength = certs.length();
-			try {
-				File tmpFile = File.createTempFile(PluginDownLoaderOfficialHTTPS.certfileOld, ".tmp", new File("."));
-				PluginDownLoaderOfficialHTTPS.writeCertsTo(tmpFile);
-				if(FileUtil.renameTo(tmpFile, certs)) {
-					long newLength = certs.length();
-					if(newLength != oldLength)
-						System.err.println("Updated "+certs+" so that update scripts will work");
-				} else {
-					if(certs.length() != tmpFile.length()) {
-						System.err.println("Cannot update "+certs+" : last-resort update scripts (in particular update.cmd on Windows) may not work");
-						File manual = new File(PluginDownLoaderOfficialHTTPS.certfileOld+".new");
-						manual.delete();
-						if(tmpFile.renameTo(manual))
-							System.err.println("Please delete "+certs+" and rename "+manual+" over it");
-						else
-							tmpFile.delete();
-					}
-				}
-			} catch (IOException e) {
-			}
+		fixCertsFile(certs);
+		if(FileUtil.detectedOS.isWindows) {
+			// updater\startssl.pem: Needed for Windows update.cmd.
+			certs = new File("updater", PluginDownLoaderOfficialHTTPS.certfileOld);
+			fixCertsFile(certs);
 		}
 	}
 
+	private void fixCertsFile(File certs) {
+		long oldLength = certs.exists() ? certs.length() : -1;
+		try {
+			File tmpFile = File.createTempFile(PluginDownLoaderOfficialHTTPS.certfileOld, ".tmp", new File("."));
+			PluginDownLoaderOfficialHTTPS.writeCertsTo(tmpFile);
+			if(FileUtil.renameTo(tmpFile, certs)) {
+				long newLength = certs.length();
+				if(newLength != oldLength)
+					System.err.println("Updated "+certs+" so that update scripts will work");
+			} else {
+				if(certs.length() != tmpFile.length()) {
+					System.err.println("Cannot update "+certs+" : last-resort update scripts (in particular update.cmd on Windows) may not work");
+					File manual = new File(PluginDownLoaderOfficialHTTPS.certfileOld+".new");
+					manual.delete();
+					if(tmpFile.renameTo(manual))
+						System.err.println("Please delete "+certs+" and rename "+manual+" over it");
+					else
+						tmpFile.delete();
+				}
+			}
+		} catch (IOException e) {
+		}
+	}
 
 	/**
 	** Sets up a program directory using the config value defined by the given
 	** parameters.
 	*/
-	protected ProgramDirectory setupProgramDir(SubConfig installConfig,
+	public ProgramDirectory setupProgramDir(SubConfig installConfig,
 	  String cfgKey, String defaultValue, String shortdesc, String longdesc, String moveErrMsg,
 	  SubConfig oldConfig) throws NodeInitException {
 		ProgramDirectory dir = new ProgramDirectory(moveErrMsg);
@@ -2686,7 +2785,7 @@ public class Node implements TimeSkewDetectorCallback {
 		return setupProgramDir(installConfig, cfgKey, defaultValue, shortdesc, longdesc, null, oldConfig);
 	}
 
-	public void lateSetupDatabase(byte[] databaseKey) throws MasterKeysWrongPasswordException, MasterKeysFileSizeException, IOException {
+	public void lateSetupDatabase(DatabaseKey databaseKey) throws MasterKeysWrongPasswordException, MasterKeysFileSizeException, IOException {
 		if(db != null) return;
 		System.out.println("Starting late database initialisation");
 		setupDatabase(databaseKey);
@@ -2740,7 +2839,7 @@ public class Node implements TimeSkewDetectorCallback {
 	 * @param databaseKey The encryption key to the database. Null if the database is not encrypted
 	 * @return A new Db4o Configuration object which is fully configured to Fred's desired database settings.
 	 */
-	private Configuration getNewDatabaseConfiguration(byte[] databaseKey) {
+	private Configuration getNewDatabaseConfiguration(DatabaseKey databaseKey) {
 		Configuration dbConfig = Db4o.newConfiguration();
 		/* On my db4o test node with lots of downloads, and several days old, com.db4o.internal.freespace.FreeSlotNode
 		 * used 73MB out of the 128MB limit (117MB used). This memory was not reclaimed despite constant garbage collection.
@@ -2801,10 +2900,8 @@ public class Node implements TimeSkewDetectorCallback {
 		// The database is encrypted.
 		if(databaseKey != null) {
 			IoAdapter baseAdapter = dbConfig.io();
-			if(logDEBUG)
-				Logger.debug(this, "Encrypting database with "+HexUtil.bytesToHex(databaseKey));
 			try {
-				dbConfig.io(new EncryptingIoAdapter(baseAdapter, databaseKey, random));
+				dbConfig.io(databaseKey.createEncryptingDb4oAdapter(baseAdapter));
 			} catch (GlobalOnlyConfigException e) {
 				// Fouled up after encrypting/decrypting.
 				System.err.println("Caught "+e+" opening encrypted database.");
@@ -2817,7 +2914,7 @@ public class Node implements TimeSkewDetectorCallback {
 		return dbConfig;
 	}
 
-	private void setupDatabase(byte[] databaseKey) throws MasterKeysWrongPasswordException, MasterKeysFileSizeException, IOException {
+	private void setupDatabase(DatabaseKey databaseKey) throws MasterKeysWrongPasswordException, MasterKeysFileSizeException, IOException {
 		/* FIXME: Backup the database! */
 
 		ObjectContainer database;
@@ -2838,10 +2935,12 @@ public class Node implements TimeSkewDetectorCallback {
 
 		try {
 			if(securityLevels.getPhysicalThreatLevel() == PHYSICAL_THREAT_LEVEL.MAXIMUM) {
-				databaseKey = new byte[32];
-				random.nextBytes(databaseKey);
-				FileUtil.secureDelete(dbFileCrypt, random);
-				FileUtil.secureDelete(dbFile, random);
+                databaseKey = DatabaseKey.createRandom(random);
+			    synchronized(this) {
+			        this.databaseKey = databaseKey;
+			    }
+				FileUtil.secureDelete(dbFileCrypt);
+				FileUtil.secureDelete(dbFile);
 				database = openCryptDatabase(databaseKey);
 				synchronized(this) {
 					databaseEncrypted = true;
@@ -2866,13 +2965,16 @@ public class Node implements TimeSkewDetectorCallback {
 						securityLevels.setThreatLevel(PHYSICAL_THREAT_LEVEL.HIGH);
 						throw e;
 					}
-					databaseKey = keys.databaseKey;
-					keys.clearAllNotDatabaseKey();
+					databaseKey = keys.createDatabaseKey(random);
+					synchronized(this) {
+					    this.databaseKey = databaseKey;
+					}
+					keys.clearAll();
 				}
 				System.err.println("Decrypting the old node.db4o.crypt ...");
 				IoAdapter baseAdapter = new RandomAccessFileAdapter();
 				EncryptingIoAdapter adapter =
-					new EncryptingIoAdapter(baseAdapter, databaseKey, random);
+				    databaseKey.createEncryptingDb4oAdapter(baseAdapter);
 				File tempFile = new File(dbFile.getPath()+".tmp");
 				tempFile.deleteOnExit();
 				FileOutputStream fos = new FileOutputStream(tempFile);
@@ -2880,7 +2982,7 @@ public class Node implements TimeSkewDetectorCallback {
 					(EncryptingIoAdapter) adapter.open(dbFileCrypt.toString(), false, 0, true);
 				long length = readAdapter.getLength();
 				// Estimate approx 1 byte/sec.
-				WrapperManager.signalStarting((int)Math.min(24*60*60*1000, 300*1000+length));
+				WrapperManager.signalStarting((int) Math.min(DAYS.toMillis(1), MINUTES.toMillis(5) + length));
 				byte[] buf = new byte[65536];
 				long read = 0;
 				while(read < length) {
@@ -2919,13 +3021,15 @@ public class Node implements TimeSkewDetectorCallback {
 					// Try with no password
 					MasterKeys keys;
 					keys = MasterKeys.read(masterKeysFile, random, "");
-					databaseKey = keys.databaseKey;
-					keys.clearAllNotDatabaseKey();
+					databaseKey = keys.createDatabaseKey(random);
+					synchronized(this) {
+					    this.databaseKey = databaseKey;
+					}
+					keys.clearAll();
 				}
 				System.err.println("Encrypting the old node.db4o ...");
 				IoAdapter baseAdapter = new RandomAccessFileAdapter();
-				EncryptingIoAdapter adapter =
-					new EncryptingIoAdapter(baseAdapter, databaseKey, random);
+				EncryptingIoAdapter adapter = databaseKey.createEncryptingDb4oAdapter(baseAdapter);
 				File tempFile = new File(dbFileCrypt.getPath()+".tmp");
 				tempFile.delete();
 				tempFile.deleteOnExit();
@@ -2934,7 +3038,7 @@ public class Node implements TimeSkewDetectorCallback {
 				FileInputStream fis = new FileInputStream(dbFile);
 				long length = dbFile.length();
 				// Estimate approx 1 byte/sec.
-				WrapperManager.signalStarting((int)Math.min(24*60*60*1000, 300*1000+length));
+				WrapperManager.signalStarting((int) Math.min(DAYS.toMillis(1), MINUTES.toMillis(5) + length));
 				byte[] buf = new byte[65536];
 				long read = 0;
 				while(read < length) {
@@ -2947,7 +3051,7 @@ public class Node implements TimeSkewDetectorCallback {
 				fis.close();
 				readAdapter.close();
 				if(FileUtil.renameTo(tempFile, dbFileCrypt)) {
-					FileUtil.secureDelete(dbFile, random);
+					FileUtil.secureDelete(dbFile);
 					System.err.println("Completed encrypting the old node.db4o.");
 					database = openCryptDatabase(databaseKey);
 					synchronized(this) {
@@ -2971,8 +3075,11 @@ public class Node implements TimeSkewDetectorCallback {
 					// Try with no password
 					MasterKeys keys;
 					keys = MasterKeys.read(masterKeysFile, random, "");
-					databaseKey = keys.databaseKey;
-					keys.clearAllNotDatabaseKey();
+					databaseKey = keys.createDatabaseKey(random);
+					synchronized(this) {
+					    this.databaseKey = databaseKey;
+					}
+					keys.clearAll();
 				}
 				database = openCryptDatabase(databaseKey);
 				synchronized(this) {
@@ -3112,7 +3219,7 @@ public class Node implements TimeSkewDetectorCallback {
 	}
 
 
-	private ObjectContainer openCryptDatabase(byte[] databaseKey) throws IOException {
+	private ObjectContainer openCryptDatabase(DatabaseKey databaseKey) throws IOException {
 		maybeDefragmentDatabase(dbFileCrypt, databaseKey);
 
 		ObjectContainer database = Db4o.openFile(getNewDatabaseConfiguration(databaseKey), dbFileCrypt.toString());
@@ -3123,7 +3230,7 @@ public class Node implements TimeSkewDetectorCallback {
 	}
 
 
-	private void maybeDefragmentDatabase(File databaseFile, byte[] databaseKey) throws IOException {
+	private void maybeDefragmentDatabase(File databaseFile, final DatabaseKey databaseKey) throws IOException {
 
 		synchronized(this) {
 			if(!defragDatabaseOnStartup) return;
@@ -3137,14 +3244,14 @@ public class Node implements TimeSkewDetectorCallback {
 		if(!databaseFile.exists()) return;
 		long length = databaseFile.length();
 		// Estimate approx 1 byte/sec.
-		WrapperManager.signalStarting((int)Math.min(24*60*60*1000, 300*1000+length));
+		WrapperManager.signalStarting((int) Math.min(DAYS.toMillis(1), MINUTES.toMillis(5) + length));
 		System.err.println("Defragmenting persistent downloads database.");
 
 		File backupFile = new File(databaseFile.getPath()+".tmp");
-		FileUtil.secureDelete(backupFile, random);
+		FileUtil.secureDelete(backupFile);
 
 		File tmpFile = new File(databaseFile.getPath()+".map");
-		FileUtil.secureDelete(tmpFile, random);
+		FileUtil.secureDelete(tmpFile);
 
 
 
@@ -3156,7 +3263,7 @@ public class Node implements TimeSkewDetectorCallback {
 		} catch (IOException e) {
 			if(backupFile.exists()) {
 				System.err.println("Defrag failed. Trying to preserve original database file.");
-				FileUtil.secureDelete(databaseFile, random);
+				FileUtil.secureDelete(databaseFile);
 				if(!backupFile.renameTo(databaseFile)) {
 					System.err.println("Unable to rename backup file back to database file! Restarting on the assumption that it didn't get closed...");
 					WrapperManager.restart();
@@ -3166,7 +3273,7 @@ public class Node implements TimeSkewDetectorCallback {
 		} catch (Db4oException e) {
 			if(backupFile.exists()) {
 				System.err.println("Defrag failed. Trying to preserve original database file.");
-				FileUtil.secureDelete(databaseFile, random);
+				FileUtil.secureDelete(databaseFile);
 				if(!backupFile.renameTo(databaseFile)) {
 					System.err.println("Unable to rename backup file back to database file! Restarting on the assumption that it didn't get closed...");
 					WrapperManager.restart();
@@ -3187,8 +3294,8 @@ public class Node implements TimeSkewDetectorCallback {
 			}
 		} else {
 			double change = 100.0 * (((double)(oldSize - newSize)) / ((double)oldSize));
-			FileUtil.secureDelete(tmpFile, random);
-			FileUtil.secureDelete(backupFile, random);
+			FileUtil.secureDelete(tmpFile);
+			FileUtil.secureDelete(backupFile);
 			System.err.println("Defragment completed. "+SizeUtil.formatSize(oldSize)+" ("+oldSize+") -> "+SizeUtil.formatSize(newSize)+" ("+newSize+") ("+(int)change+"% shrink)");
 		}
 
@@ -3210,7 +3317,7 @@ public class Node implements TimeSkewDetectorCallback {
 
 
 	public void killMasterKeysFile() throws IOException {
-		MasterKeys.killMasterKeys(masterKeysFile, random);
+		MasterKeys.killMasterKeys(masterKeysFile);
 	}
 
 
@@ -3270,11 +3377,6 @@ public class Node implements TimeSkewDetectorCallback {
 		@Override
 		public String getTitle() {
 			return NodeL10n.getBase().getString("SecurityLevels.enterPassword");
-		}
-
-		@Override
-		public Object getUserIdentifier() {
-			return Node.this;
 		}
 
 		@Override
@@ -3356,78 +3458,12 @@ public class Node implements TimeSkewDetectorCallback {
 
 	private void finishInitSaltHashFS(final String suffix, NodeClientCore clientCore) {
 		if(clientCore.alerts == null) throw new NullPointerException();
-		((SaltedHashFreenetStore<CHKBlock>) chkDatastore.getStore()).setUserAlertManager(clientCore.alerts);
-		((SaltedHashFreenetStore<CHKBlock>) chkDatacache.getStore()).setUserAlertManager(clientCore.alerts);
-		((SaltedHashFreenetStore<DSAPublicKey>) pubKeyDatastore.getStore()).setUserAlertManager(clientCore.alerts);
-		((SaltedHashFreenetStore<DSAPublicKey>) pubKeyDatacache.getStore()).setUserAlertManager(clientCore.alerts);
-		((SaltedHashFreenetStore<SSKBlock>) sskDatastore.getStore()).setUserAlertManager(clientCore.alerts);
-		((SaltedHashFreenetStore<SSKBlock>) sskDatacache.getStore()).setUserAlertManager(clientCore.alerts);
-
-		if (isBDBStoreExist(suffix)) {
-			clientCore.alerts.register(new SimpleUserAlert(true, NodeL10n.getBase().getString("Node.storeSaltHashMigratedShort"),
-			        NodeL10n.getBase().getString("Node.storeSaltHashMigratedShort"), NodeL10n.getBase()
-			                .getString("Node.storeSaltHashMigratedShort"), UserAlert.MINOR) {
-
-				@Override
-				public HTMLNode getHTMLText() {
-					HTMLNode div = new HTMLNode("div");
-					div.addChild("#", NodeL10n.getBase().getString("Node.storeSaltHashMigrated"));
-					HTMLNode ul = div.addChild("ul");
-
-					for (String type : new String[] { "chk", "pubkey", "ssk" })
-						for (String storecache : new String[] { "store", "store.keys", "store.lru", "cache",
-						        "cache.keys", "cache.lru" }) {
-							File f = storeDir.file(type + suffix + "." + storecache);
-							if (f.exists())
-								ul.addChild("li", f.getAbsolutePath());
-						}
-
-					File dbDir = storeDir.file("database" + suffix);
-					if (dbDir.exists())
-						ul.addChild("li", dbDir.getAbsolutePath());
-
-					return div;
-				}
-
-				@Override
-				public String getText() {
-					StringBuilder sb = new StringBuilder();
-					sb.append(NodeL10n.getBase().getString("Node.storeSaltHashMigrated") + " \n");
-
-					for (String type : new String[] { "chk", "pubkey", "ssk" })
-						for (String storecache : new String[] { "store", "store.keys", "store.lru", "cache",
-						        "cache.keys", "cache.lru" }) {
-							File f = storeDir.file(type + suffix + "." + storecache);
-					if (f.exists())
-								sb.append(" - ");
-							sb.append(f.getAbsolutePath());
-							sb.append("\n");
-					}
-					File dbDir = storeDir.file("database" + suffix);
-					if (dbDir.exists()) {
-						sb.append(" - ");
-						sb.append(dbDir.getAbsolutePath());
-						sb.append("\n");
-					}
-
-					return sb.toString();
-				}
-
-				@Override
-				public boolean isValid() {
-					return isBDBStoreExist(suffix);
-				}
-
-				@Override
-				public void onDismiss() {
-				}
-
-				@Override
-				public boolean userCanDismiss() {
-					return true;
-				}
-			});
-		}
+		chkDatastore.getStore().setUserAlertManager(clientCore.alerts);
+		chkDatacache.getStore().setUserAlertManager(clientCore.alerts);
+		pubKeyDatastore.getStore().setUserAlertManager(clientCore.alerts);
+		pubKeyDatacache.getStore().setUserAlertManager(clientCore.alerts);
+		sskDatastore.getStore().setUserAlertManager(clientCore.alerts);
+		sskDatacache.getStore().setUserAlertManager(clientCore.alerts);
 	}
 
 	private void initRAMFS() {
@@ -3446,17 +3482,8 @@ public class Node implements TimeSkewDetectorCallback {
 		new RAMFreenetStore<SSKBlock>(sskDatacache, (int) Math.min(Integer.MAX_VALUE, maxCacheKeys));
 	}
 
-	private boolean isBDBStoreExist(final String suffix) {
-		for(String type : new String[] { "chk", "pubkey", "ssk" }) {
-			for(String ver : new String[] { "store", "cache" }) {
-				for(String ext : new String[] { "", ".keys", ".lru" }) {
-					if(storeDir.file(type + suffix + "." + ver + ext).exists()) return true;
-				}
-			}
-		}
-		if(storeDir.file("database" + suffix).exists()) return true;
-		return false;
-    }
+	private long cachingFreenetStoreMaxSize;
+	private long cachingFreenetStorePeriod;
 
 	private void initSaltHashFS(final String suffix, boolean dontResizeOnStart, byte[] masterKey) throws NodeInitException {
 		try {
@@ -3641,11 +3668,19 @@ public class Node implements TimeSkewDetectorCallback {
 		SaltedHashFreenetStore<T> fs = SaltedHashFreenetStore.<T>construct(getStoreDir(), type+"-"+store, cb,
 		        random, maxKeys, storeUseSlotFilters, shutdownHook, storePreallocate, storeSaltHashResizeOnStart && !lateStart, lateStart ? ticker : null, clientCacheMasterKey);
 		cb.setStore(fs);
-		return fs;
+		if(cachingFreenetStoreMaxSize > 0)
+			return new CachingFreenetStore<T>(cb, cachingFreenetStoreMaxSize, cachingFreenetStorePeriod, fs, ticker);
+		else
+			return fs;
 	}
 
 	public void start(boolean noSwaps) throws NodeInitException {
-
+		
+		// IMPORTANT: Read the peers only after we have finished initializing Node.
+		// Peer constructors are complex and can call methods on Node.
+		peers.tryReadPeers(nodeDir.file("peers-"+getDarknetPortNumber()).getPath(), darknetCrypto, null, false, false);
+		peers.updatePMUserAlert();
+		
 		dispatcher.start(nodeStats); // must be before usm
 		dnsr.start();
 		peers.start(); // must be before usm
@@ -4159,19 +4194,34 @@ public class Node implements TimeSkewDetectorCallback {
 		}
 	}
 
-	public CHKStore getChkDatacache() {
+	CHKStore getChkDatacache() {
 		return chkDatacache;
 	}
-	public CHKStore getChkDatastore() {
+	CHKStore getChkDatastore() {
 		return chkDatastore;
 	}
-	public SSKStore getSskDatacache() {
+	SSKStore getSskDatacache() {
 		return sskDatacache;
 	}
-	public SSKStore getSskDatastore() {
+	SSKStore getSskDatastore() {
 		return sskDatastore;
 	}
 
+        CHKStore getChkSlashdotCache() {
+            return chkSlashdotcache;
+        }
+
+        CHKStore getChkClientCache() {
+            return chkClientcache;
+        }
+
+        SSKStore getSskSlashdotCache() {
+            return sskSlashdotcache;
+        }
+
+        SSKStore getSskClientCache() {
+            return sskClientcache;
+        }
 
 	/**
 	 * This method returns all statistics info for our data store stats table
@@ -4263,8 +4313,6 @@ public class Node implements TimeSkewDetectorCallback {
 				failureTable.onFound(block);
 		} catch (IOException e) {
 			Logger.error(this, "Cannot store data: "+e, e);
-		} catch (OutOfMemoryError e) {
-			OOMHandler.handleOOM(e);
 		} catch (Throwable t) {
 			System.err.println(t);
 			t.printStackTrace();
@@ -4313,8 +4361,6 @@ public class Node implements TimeSkewDetectorCallback {
 				failureTable.onFound(block);
 		} catch (IOException e) {
 			Logger.error(this, "Cannot store data: "+e, e);
-		} catch (OutOfMemoryError e) {
-			OOMHandler.handleOOM(e);
 		} catch (KeyCollisionException e) {
 			throw e;
 		} catch (Throwable t) {
@@ -4430,23 +4476,6 @@ public class Node implements TimeSkewDetectorCallback {
 			sb.append(peers.getTMCIPeerList());
 		else
 			sb.append("No peers yet");
-		return sb.toString();
-	}
-
-	/**
-	 * @return Data String for freeviz.
-	 */
-	public String getFreevizOutput() {
-		StringBuilder sb = new StringBuilder();
-
-		sb.append("\ntransferring_requests=");
-		sb.append(tracker.getNumTransferringRequestSenders());
-
-		sb.append('\n');
-
-		if (peers != null)
-			sb.append(peers.getFreevizOutput());
-
 		return sb.toString();
 	}
 
@@ -4613,7 +4642,7 @@ public class Node implements TimeSkewDetectorCallback {
 			Logger.normal(this, "Received differential node reference node to node message from "+src.getPeer());
 			SimpleFieldSet fs = null;
 			try {
-				fs = new SimpleFieldSet(new String(data, "UTF-8"), false, true);
+				fs = new SimpleFieldSet(new String(data, "UTF-8"), false, true, false);
 			} catch (IOException e) {
 				Logger.error(this, "IOException while parsing node to node message data", e);
 				return;
@@ -4643,7 +4672,7 @@ public class Node implements TimeSkewDetectorCallback {
 			Logger.normal(this, "Received N2NTM from '"+darkSource.getPeer()+"'");
 			SimpleFieldSet fs = null;
 			try {
-				fs = new SimpleFieldSet(new String(data, "UTF-8"), false, true);
+				fs = new SimpleFieldSet(new String(data, "UTF-8"), false, true, false);
 			} catch (UnsupportedEncodingException e) {
 				throw new Error("Impossible: JVM doesn't support UTF-8: " + e, e);
 			} catch (IOException e) {
@@ -4805,7 +4834,7 @@ public class Node implements TimeSkewDetectorCallback {
 		return lm.getAverageSwapTime();
 	}
 
-	public int getSendSwapInterval() {
+	public long getSendSwapInterval() {
 		return lm.getSendSwapInterval();
 	}
 
@@ -5141,13 +5170,6 @@ public class Node implements TimeSkewDetectorCallback {
 		}
 	};
 
-	public void onTooLowMTU(int minAdvertisedMTU, int minAcceptableMTU) {
-		if(alertMTUTooSmall == null) {
-			alertMTUTooSmall = new SimpleUserAlert(false, l10n("tooSmallMTU"), l10n("tooSmallMTULong", new String[] { "mtu", "minMTU" }, new String[] { Integer.toString(minAdvertisedMTU), Integer.toString(minAcceptableMTU) }), l10n("tooSmallMTUShort"), UserAlert.ERROR);
-		} else return;
-		clientCore.alerts.register(alertMTUTooSmall);
-	}
-
 	public void setDispatcherHook(NodeDispatcherCallback cb) {
 		this.dispatcher.setHook(cb);
 	}
@@ -5200,7 +5222,7 @@ public class Node implements TimeSkewDetectorCallback {
 							}
 						}
 
-					}, 10*60*1000);
+					}, MINUTES.toMillis(10));
 				}
 			} else wantClientCache = true;
 			wantDatabase = db == null;
@@ -5208,7 +5230,7 @@ public class Node implements TimeSkewDetectorCallback {
 		if(wantClientCache)
 			activatePasswordedClientCache(keys);
 		if(wantDatabase)
-			lateSetupDatabase(keys.databaseKey);
+			lateSetupDatabase(keys.createDatabaseKey(random));
 	}
 
 
@@ -5274,8 +5296,8 @@ public class Node implements TimeSkewDetectorCallback {
 			db = null;
 		}
 		try {
-			FileUtil.secureDelete(dbFile, random);
-			FileUtil.secureDelete(dbFileCrypt, random);
+			FileUtil.secureDelete(dbFile);
+			FileUtil.secureDelete(dbFileCrypt);
 		} catch (IOException e) {
 			// Ignore
 		}
@@ -5304,6 +5326,16 @@ public class Node implements TimeSkewDetectorCallback {
 		return db != null;
 	}
 
+        /**
+         * @return canonical path of the database file in use.
+         */
+        public String getDatabasePath() throws IOException {
+                if (isDatabaseEncrypted()) {
+                        return dbFileCrypt.getCanonicalPath();
+                } else {
+                        return dbFile.getCanonicalPath();
+                }
+        }
 
 	public synchronized boolean autoChangeDatabaseEncryption() {
 		return autoChangeDatabaseEncryption;
@@ -5452,7 +5484,12 @@ public class Node implements TimeSkewDetectorCallback {
 	}
 	
 	public boolean enableNewLoadManagement(boolean realTimeFlag) {
-		return nodeStats.enableNewLoadManagement(realTimeFlag);
+		NodeStats stats = this.nodeStats;
+		if(stats == null) {
+			Logger.error(this, "Calling enableNewLoadManagement before Node constructor completes! FIX THIS!", new Exception("error"));
+			return false;
+		}
+		return stats.enableNewLoadManagement(realTimeFlag);
 	}
 	
 	/** FIXME move to Probe.java? */
@@ -5480,4 +5517,33 @@ public class Node implements TimeSkewDetectorCallback {
 		return transportManagers.get(transportMode);
 	}
 	
+    public byte[] getPluginStoreKey(String storeIdentifier) {
+        DatabaseKey key;
+        synchronized(this) {
+            key = databaseKey;
+        }
+        if(key != null)
+            return key.getPluginStoreKey(storeIdentifier);
+        else
+            return null;
+    }
+
+	private void checkOutputBandwidthLimit(int obwLimit) throws InvalidConfigValueException {
+		if(obwLimit <= 0) throw new InvalidConfigValueException(l10n("bwlimitMustBePositive"));
+		if (obwLimit < minimumBandwidth) throw lowBandwidthLimit(obwLimit);
+	}
+
+	private void checkInputBandwidthLimit(int ibwLimit) throws InvalidConfigValueException {
+		// Reserved value for limit based on output limit.
+		if (ibwLimit == -1) {
+			return;
+		}
+		if(ibwLimit <= 1) throw new InvalidConfigValueException(l10n("bandwidthLimitMustBePositiveOrMinusOne"));
+		if (ibwLimit < minimumBandwidth) throw lowBandwidthLimit(ibwLimit);
+	}
+
+	public PluginManager getPluginManager() {
+		return pluginManager;
+	}
+
 }

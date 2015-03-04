@@ -183,12 +183,12 @@ public class NativeThread extends Thread {
 	public static String normalizeName(String name) {
 		if(name.indexOf(" for ") != -1)
 			name = name.substring(0, name.indexOf(" for "));
-		if(name.indexOf("@") != -1)
-			name = name.substring(0, name.indexOf("@"));
-		if (name.indexOf("(") != -1)
-			name = name.substring(0, name.indexOf("("));
+		if(name.indexOf('@') != -1)
+			name = name.substring(0, name.indexOf('@'));
+		if (name.indexOf('(') != -1)
+			name = name.substring(0, name.indexOf('('));
 		
-		return name;
+		return name.trim();
 	}
 	
 	public String getNormalizedName() {

@@ -289,18 +289,6 @@ public class NodeDispatcher implements Dispatcher, Runnable {
 			return handleRoutedReply(m);
 		} else if(spec == DMT.FNPRoutedRejected) {
 			return handleRoutedRejected(m);
-			// FIXME implement threaded probe requests of various kinds.
-			// Old probe request code was a major pain, never really worked.
-			// We should have threaded probe requests (for simple code),
-			// and one for each routing strategy.
-//		} else if(spec == DMT.FNPProbeRequest) {
-//			return handleProbeRequest(m, source);
-//		} else if(spec == DMT.FNPProbeReply) {
-//			return handleProbeReply(m, source);
-//		} else if(spec == DMT.FNPProbeRejected) {
-//			return handleProbeRejected(m, source);
-//		} else if(spec == DMT.FNPProbeTrace) {
-//			return handleProbeTrace(m, source);
 		} else if(spec == DMT.FNPOfferKey) {
 			return handleOfferKey(m, source);
 		} else if(spec == DMT.FNPGetOfferedKey) {
@@ -448,8 +436,8 @@ public class NodeDispatcher implements Dispatcher, Runnable {
 		boolean purge = m.getBoolean(DMT.PURGE);
 		if(purge) {
 			OpennetManager om = node.getOpennet();
-			if(om != null)
-				om.purgeOldOpennetPeer(source);
+			if(om != null && source instanceof OpennetPeerNode)
+				om.purgeOldOpennetPeer((OpennetPeerNode)source);
 		}
 		// Process parting message
 		int type = m.getInt(DMT.NODE_TO_NODE_MESSAGE_TYPE);
@@ -733,7 +721,7 @@ public class NodeDispatcher implements Dispatcher, Runnable {
 			}
 			if(source instanceof SeedClientPeerNode) {
 				short maxHTL = node.maxHTL();
-				if(htl != maxHTL) {
+				if(htl < maxHTL-1) {
 					Logger.error(this, "Announcement from seed client not at max HTL: "+htl+" for "+source);
 					htl = maxHTL;
 				}
@@ -756,7 +744,7 @@ public class NodeDispatcher implements Dispatcher, Runnable {
 						synchronized(this) {
 							totalAdded++;
 						}
-						Logger.error(this, "Announcement from "+origin+" added node "+pn+" - THIS SHOULD NOT HAPPEN!");
+						Logger.minor(this, "Announcement from "+origin+" added node "+pn+(pn instanceof SeedClientPeerNode ? " (seed server added the peer directly)" : ""));
 						return;
 					}
 					@Override

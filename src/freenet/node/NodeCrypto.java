@@ -9,6 +9,7 @@ import java.io.UnsupportedEncodingException;
 import java.math.BigInteger;
 import java.net.MalformedURLException;
 import java.security.MessageDigest;
+import java.security.interfaces.ECPublicKey;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -27,6 +28,8 @@ import freenet.crypt.DSAGroup;
 import freenet.crypt.DSAPrivateKey;
 import freenet.crypt.DSAPublicKey;
 import freenet.crypt.DSASignature;
+import freenet.crypt.ECDSA;
+import freenet.crypt.ECDSA.Curves;
 import freenet.crypt.Global;
 import freenet.crypt.RandomSource;
 import freenet.crypt.SHA256;
@@ -49,11 +52,9 @@ import freenet.pluginmanager.UnsupportedIPAddressOperationException;
 import freenet.support.Base64;
 import freenet.support.Fields;
 import freenet.support.IllegalBase64Exception;
-import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.SerialExecutor;
 import freenet.support.SimpleFieldSet;
-import freenet.support.Logger.LogLevel;
 import freenet.support.io.Closer;
 import freenet.support.io.NativeThread;
 
@@ -62,6 +63,8 @@ import freenet.support.io.NativeThread;
  * @author toad
  */
 public class NodeCrypto {
+    static { Logger.registerClass(NodeCrypto.class); }
+    private static volatile boolean logMINOR;
 
 	/** Length of a node identity */
 	public static final int IDENTITY_LENGTH = 32;
@@ -114,6 +117,9 @@ public class NodeCrypto {
 	private DSAPublicKey pubKey;
 	byte[] pubKeyHash;
 	byte[] pubKeyHashHash;
+	/** My ECDSA/P256 keypair and context */
+	private ECDSA ecdsaP256;
+	byte[] ecdsaPubKeyHash;
 	/** My ARK SSK private key */
 	InsertableClientSSK myARK;
 	/** My ARK sequence number */
@@ -127,18 +133,11 @@ public class NodeCrypto {
 	private String mySignedReference = null;
 	/** The signature of the above fieldset */
 	private DSASignature myReferenceSignature = null;
+	/** The ECDSA/P256 signature of the above fieldset */
+	private String myReferenceECDSASignature = null;
 	/** A synchronization object used while signing the reference fieldset */
 	private volatile Object referenceSync = new Object();
 
-        private static volatile boolean logMINOR;
-	static {
-		Logger.registerLogThresholdCallback(new LogThresholdCallback(){
-			@Override
-			public void shouldUpdate(){
-				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
-			}
-		});
-	}
 	/**
 	 * Get port number from a config, create socket and packet mangler
 	 * @throws NodeInitException
@@ -291,19 +290,37 @@ public class NodeCrypto {
 		anonSetupCipher.initialize(identityHash);
 		identityHashHash = SHA256.digest(identityHash);
 
+		SimpleFieldSet ecdsaSFS = null;
 		try {
 			cryptoGroup = DSAGroup.create(fs.subset("dsaGroup"));
 			privKey = DSAPrivateKey.create(fs.subset("dsaPrivKey"), cryptoGroup);
 			pubKey = DSAPublicKey.create(fs.subset("dsaPubKey"), cryptoGroup);
 			pubKeyHash = SHA256.digest(pubKey.asBytes());
 			pubKeyHashHash = SHA256.digest(pubKeyHash);
+			
+			ecdsaSFS = fs.subset("ecdsa");
+			if(ecdsaSFS != null) {
+			    ecdsaP256 = new ECDSA(ecdsaSFS.subset(ECDSA.Curves.P256.name()), Curves.P256);
+		    }
 		} catch (IllegalBase64Exception e) {
 			Logger.error(this, "Caught "+e, e);
 			throw new IOException(e.toString());
 		} catch (FSParseException e) {
 			Logger.error(this, "Caught "+e, e);
 			throw new IOException(e.toString());
+		} catch (IllegalArgumentException e) {
+			// DSAPrivateKey is invalid
+			Logger.error(this, "Caught "+e, e);
+			throw new IOException(e.toString());
 		}
+		
+		if(ecdsaP256 == null) {
+		    // We don't have a keypair, generate one.
+		    Logger.normal(this, "No ecdsa.P256 field found in noderef: let's generate a new key");
+		    ecdsaP256 = new ECDSA(Curves.P256);
+		}
+        ecdsaPubKeyHash = SHA256.digest(ecdsaP256.getPublicKey().getEncoded());
+		
 		InsertableClientSSK ark = null;
 
 		// ARK
@@ -370,6 +387,8 @@ public class NodeCrypto {
 		identityHash = md.digest(myIdentity);
 		identityHashHash = md.digest(identityHash);
 		anonSetupCipher.initialize(identityHash);
+		ecdsaP256 = new ECDSA(ECDSA.Curves.P256);
+        ecdsaPubKeyHash = SHA256.digest(ecdsaP256.getPublicKey().getEncoded());
 	}
 
 	public void start() {
@@ -436,6 +455,11 @@ public class NodeCrypto {
 			}
 		} // Don't include IPs for anonymous initiator.
 		// Negotiation types
+		if(!(forARK || forSetup || forAnonInitiator)) {
+		    // We *do* need the location on noderefs exchanged via path folding and announcement.
+		    // This is necessary so we can take the location into account in OpennetManager.wantPeer().
+		    fs.put("location", node.lm.getLocation());
+		}
 		fs.putSingle("version", Version.getVersionString()); // Keep, vital that peer know our version. For example, some types may be sent in different formats to different node versions (e.g. Peer).
 		if(!forAnonInitiator)
 			fs.putSingle("lastGoodVersion", Version.getLastGoodVersionString()); // Also vital
@@ -450,10 +474,15 @@ public class NodeCrypto {
 			// Anonymous initiator setup type specifies whether the node is opennet or not.
 			fs.put("opennet", isOpennet);
 			synchronized (referenceSync) {
-				if(myReferenceSignature == null || mySignedReference == null || !mySignedReference.equals(fs.toOrderedString())){
+				if(myReferenceSignature == null || myReferenceECDSASignature == null || mySignedReference == null || !mySignedReference.equals(fs.toOrderedString())){
 					mySignedReference = fs.toOrderedString();
 					try {
-						myReferenceSignature = signRef(mySignedReference);
+					    myReferenceECDSASignature = ecdsaSignRef(mySignedReference);
+
+					    // Old nodes will verify the signature including sigP256
+					    fs.putSingle("sigP256", myReferenceECDSASignature);
+					    mySignedReference = fs.toOrderedString();
+					    myReferenceSignature = signRef(mySignedReference);
 					} catch (NodeInitException e) {
 						node.exit(e.exitCode);
 					}
@@ -477,6 +506,7 @@ public class NodeCrypto {
 			// These are invariant. They cannot change on connection setup. They can safely be excluded.
 			fs.put("dsaGroup", cryptoGroup.asFieldSet());
 			fs.put("dsaPubKey", pubKey.asFieldSet());
+			fs.put("ecdsa", ecdsaP256.asFieldSet(false));
 		}
 		if(!forAnonInitiator) {
 			// Short-lived connections don't need ARK and don't need negTypes either.
@@ -489,7 +519,7 @@ public class NodeCrypto {
 		return fs;
 	}
 
-	DSASignature signRef(String mySignedReference) throws NodeInitException {
+	private DSASignature signRef(String mySignedReference) throws NodeInitException {
 		if(logMINOR) Logger.minor(this, "Signing reference:\n"+mySignedReference);
 
 		try{
@@ -501,12 +531,27 @@ public class NodeCrypto {
 				throw new NodeInitException(NodeInitException.EXIT_EXCEPTION_TO_DEBUG, mySignedReference);
 			return _signature;
 		} catch(UnsupportedEncodingException e){
-			//duh ?
-			Logger.error(this, "Error while signing the node identity!" + e, e);
-			System.err.println("Error while signing the node identity!"+e);
-			e.printStackTrace();
 			throw new NodeInitException(NodeInitException.EXIT_CRAPPY_JVM, "Impossible: JVM doesn't support UTF-8");
 		}
+	}
+	
+	private String ecdsaSignRef(String mySignedReference) throws NodeInitException {
+	    if(logMINOR) Logger.minor(this, "Signing reference:\n"+mySignedReference);
+
+	    try{
+	        byte[] ref = mySignedReference.getBytes("UTF-8");
+	        // We don't need a padded signature here
+	        byte[] sig = ecdsaP256.sign(ref);
+	        if(logMINOR && !ECDSA.verify(Curves.P256, getECDSAP256Pubkey(), sig, ref))
+	            throw new NodeInitException(NodeInitException.EXIT_EXCEPTION_TO_DEBUG, mySignedReference);
+	        return Base64.encode(sig);
+	    } catch(UnsupportedEncodingException e){
+	        //duh ?
+	        Logger.error(this, "Error while signing the node identity!" + e, e);
+	        System.err.println("Error while signing the node identity!"+e);
+	        e.printStackTrace();
+	        throw new NodeInitException(NodeInitException.EXIT_CRAPPY_JVM, "Impossible: JVM doesn't support UTF-8");
+	    }
 	}
 
 	private byte[] myCompressedRef(boolean setup, boolean heavySetup, boolean forARK) {
@@ -572,12 +617,12 @@ public class NodeCrypto {
 	}
 
 	void addPrivateFields(SimpleFieldSet fs) {
+	    // Let's not add it twice
+	    fs.removeSubset("ecdsa");
+	    fs.put("ecdsa", ecdsaP256.asFieldSet(true));
+	    
 		fs.put("dsaPrivKey", privKey.asFieldSet());
 		fs.putSingle("ark.privURI", myARK.getInsertURI().toString(false, false));
-		// FIXME remove the conditional after we've removed it from exportPublic...
-		// We must save the location!
-		if(fs.get("location") == null)
-			fs.put("location", node.lm.getLocation());
 		fs.putSingle("clientNonce", Base64.encode(clientNonce));
 
 	}
@@ -587,8 +632,22 @@ public class NodeCrypto {
 	}
 
 	/** Sign a hash */
-	DSASignature sign(byte[] hash) {
-		return DSA.sign(cryptoGroup, privKey, new NativeBigInteger(1, hash), random);
+	byte[] sign(byte[] hash) {
+        byte[] sig = new byte[Node.SIGNATURE_PARAMETER_LENGTH*2];
+        DSASignature s = DSA.sign(cryptoGroup, privKey, new NativeBigInteger(1, hash), random);
+        System.arraycopy(s.getRBytes(Node.SIGNATURE_PARAMETER_LENGTH), 0, sig, 0, Node.SIGNATURE_PARAMETER_LENGTH);
+        System.arraycopy(s.getSBytes(Node.SIGNATURE_PARAMETER_LENGTH), 0, sig, Node.SIGNATURE_PARAMETER_LENGTH, Node.SIGNATURE_PARAMETER_LENGTH);
+		return sig;
+	}
+	
+	/** Sign data with the node's ECDSA key. The data does not need to be hashed, the signing code
+	 * will handle that for us, using an algorithm appropriate for the keysize. */
+	byte[] ecdsaSign(byte[]... data) {
+	    return ecdsaP256.signToNetworkFormat(data);
+	}
+
+	public ECPublicKey getECDSAP256Pubkey() {
+	    return ecdsaP256.getPublicKey();
 	}
 
 	public void onSetDropProbability(int val) {
@@ -700,11 +759,16 @@ public class NodeCrypto {
 
 	/**
 	 * Get my identity.
-	 * @param unknownInitiator Unknown-initiator connections use the hash of the pubkey as the identity to save space
-	 * in packets 3 and 4.
+	 * @param unknownInitiator True in JFK(4) for unknownInitiator, false otherwise. 
+	 * Unknown-initiator connections use the hash of the pubkey as the identity to save space in 
+	 * packets 3 and 4. Note that this only applies when we are sending packet 4, i.e. the final 
+	 * reply from the responder to the initiator, thus the responder doesn't need to have the 
+	 * identity. FIXME This complexity can be removed as soon as negType 9 is mandatory!
 	 */
-	public byte[] getIdentity(boolean unknownInitiator) {
-		if(unknownInitiator)
+	public byte[] getIdentity(int negType, boolean unknownInitiator) {
+	    if(negType > 8)
+	        return ecdsaPubKeyHash;
+	    else if(unknownInitiator)
 			return this.pubKey.asBytesHash();
 		else
 			return myIdentity;

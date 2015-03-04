@@ -1,5 +1,7 @@
 package freenet.clients.http;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -28,7 +30,7 @@ import freenet.client.events.ExpectedMIMEEvent;
 import freenet.client.events.SendingToNetworkEvent;
 import freenet.client.events.SplitfileProgressEvent;
 import freenet.client.filter.ContentFilter;
-import freenet.client.filter.MIMEType;
+import freenet.client.filter.FilterMIMEType;
 import freenet.client.filter.UnknownContentTypeException;
 import freenet.keys.FreenetURI;
 import freenet.keys.USK;
@@ -238,7 +240,7 @@ public class FProxyFetchInProgress implements ClientEventListener, ClientGetCall
 		}
 		String fullMimeType = mimeType;
 		mimeType = ContentFilter.stripMIMEType(mimeType);
-		MIMEType type = ContentFilter.getMIMEType(mimeType);
+		FilterMIMEType type = ContentFilter.getMIMEType(mimeType);
 		if(type == null || ((!type.safeToRead) && type.readFilter == null)) {
 			UnknownContentTypeException e = new UnknownContentTypeException(mimeType);
 			data.free();
@@ -429,7 +431,7 @@ public class FProxyFetchInProgress implements ClientEventListener, ClientGetCall
 	}
 
 	/** Keep for 30 seconds after last access */
-	static final int LIFETIME = 30 * 1000;
+	static final long LIFETIME = SECONDS.toMillis(30);
 	
 	/** Caller should take the lock on FProxyToadlet.fetchers, then call this 
 	 * function, if it returns true then finish the cancel outside the lock.

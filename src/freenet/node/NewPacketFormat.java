@@ -3,6 +3,8 @@
  * http://www.gnu.org/ for further details of the GPL. */
 package freenet.node;
 
+import static java.util.concurrent.TimeUnit.MINUTES;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -31,6 +33,7 @@ public class NewPacketFormat implements PacketFormat {
 	// FIXME increase this significantly to let it ride over network interruptions.
 	private static final int NUM_SEQNUMS_TO_WATCH_FOR = 1024;
 	static final long NUM_SEQNUMS = 2147483648l;
+	private static final long MAX_MSGID_BLOCK_TIME = MINUTES.toMillis(10);
 	private static final int MAX_ACKS = 500;
 	static boolean DO_KEEPALIVES = true;
 
@@ -328,7 +331,7 @@ public class NewPacketFormat implements PacketFormat {
 		int maxPacketSize = peerTransport.transportPlugin.getMaxPacketSize();
 		NewPacketFormatKeyContext keyContext = sessionKey.packetContext;
 
-		NPFPacket packet = createPacket(maxPacketSize - hmacLength, sessionKey, ackOnly);
+		NPFPacket packet = createPacket(maxPacketSize - hmacLength, sessionKey, ackOnly, peerTransport.pn.isUseCumulativeAcksSet());
 		if(packet == null) return false;
 
 		int paddedLen = packet.getLength() + hmacLength;
@@ -374,7 +377,7 @@ public class NewPacketFormat implements PacketFormat {
 			if(logMINOR) {
 				String fragments = null;
 				for(MessageFragment frag : packet.getFragments()) {
-					if(fragments == null) fragments = "" + frag.messageID;
+					if(fragments == null) fragments = String.valueOf(frag.messageID);
 					else fragments = fragments + ", " + frag.messageID;
 					fragments += " ("+frag.fragmentOffset+"->"+(frag.fragmentOffset+frag.fragmentLength-1)+")";
 				}
@@ -415,7 +418,7 @@ public class NewPacketFormat implements PacketFormat {
 		return true;
 	}
 
-	NPFPacket createPacket(int maxPacketSize, SessionKey sessionKey, boolean ackOnly) throws BlockedTooLongException {
+	NPFPacket createPacket(int maxPacketSize, SessionKey sessionKey, boolean ackOnly, boolean useCumulativeAcks) throws BlockedTooLongException {
 		
 		checkForLostPackets();
 		
@@ -425,7 +428,7 @@ public class NewPacketFormat implements PacketFormat {
 		long now = System.currentTimeMillis();
 		NewPacketFormatKeyContext keyContext = sessionKey.packetContext;
 		
-		AddedAcks moved = keyContext.addAcks(packet, maxPacketSize, now);
+		AddedAcks moved = keyContext.addAcks(packet, maxPacketSize, now, useCumulativeAcks);
 		if(moved != null && moved.anyUrgentAcks) {
 			if(logDEBUG) Logger.debug(this, "Must send because urgent acks");
 			mustSend = true;
@@ -588,39 +591,117 @@ public class NewPacketFormat implements PacketFormat {
 				}
 			}
 			
-			MutableBoolean needsPingMessage = new MutableBoolean(false);
-			if(mustSendKeepalive && packet.noFragments()) {
-				needsPingMessage.value = true;
-			}
-			//Fragment header is max 9 bytes, allow min 1 byte data
-			// FIXME Check above where the 10 is not used and avoid usage of a number 10 without defining it.
-			while((packet.getLength() + 10)< maxPacketSize) {
-				MessageFragment frag = pmt.loadMessageFragments(now, maxPacketSize - packet.getLength(), needsPingMessage, addStatsBulk, addStatsRT);
-				if(frag == null) break;
-				mustSend = true;
-				packet.addMessageFragment(frag);
-				sentPacket.addFragment(frag);
-				
-				if(addStatsBulk.value && !addedStatsBulk) {
-					MessageItem item = pn.makeLoadStats(false, false, true);
-					if(item != null) {
-						byte[] buf = item.getData();
-						haveAddedStatsBulk = buf;
-						// FIXME if this fails, drop some messages.
-						packet.addLossyMessage(buf, maxPacketSize);
-						addedStatsBulk = true;
-					}
-				}
-				
-				if(addStatsRT.value && !addedStatsRT) {
-					MessageItem item = pn.makeLoadStats(true, false, true);
-					if(item != null) {
-						byte[] buf = item.getData();
-						haveAddedStatsRT = buf;
-						// FIXME if this fails, drop some messages.
-						packet.addLossyMessage(buf, maxPacketSize);
-						addedStatsRT = true;
-					}
+			fragments:
+				for(int i = 0; i < startedByPrio.size(); i++) {
+
+					prio:
+					while(true) {
+						
+						boolean addStatsBulk = false;
+						boolean addStatsRT = false;
+						
+						//Add messages from the message queue
+						while ((packet.getLength() + 10) < maxPacketSize) { //Fragment header is max 9 bytes, allow min 1 byte data
+							
+							if(!checkedCanSend) {
+								// Check in advance to avoid reordering message items.
+								cantSend = !canSend(sessionKey);
+							}
+							checkedCanSend = false;
+							if(cantSend) break;
+							boolean wasGeneratedPing = false;
+							
+							MessageItem item = null;
+							item = messageQueue.grabQueuedMessageItem(i);
+							if(item == null) {
+								if(mustSendKeepalive && packet.noFragments()) {
+									// Create a ping for keepalive purposes.
+									// It will be acked, this ensures both sides don't timeout.
+									Message msg;
+									synchronized(this) {
+										msg = DMT.createFNPPing(pingCounter++);
+									}
+									item = new MessageItem(msg, null, null);
+									item.setDeadline(now + PacketSender.MAX_COALESCING_DELAY);
+									wasGeneratedPing = true;
+									// Should we report this on the PeerNode's stats? We'd need to run a job off-thread, so probably not worth it.
+								} else {
+									break prio;
+								}
+							}
+							
+							int messageID = getMessageID();
+							if(messageID == -1) {
+								// CONCURRENCY: This will fail sometimes if we send messages to the same peer from different threads.
+								// This doesn't happen at the moment because we use a single PacketSender for all ports and all peers.
+								// We might in future split it across multiple threads but it'd be best to keep the same peer on the same thread.
+								Logger.error(this, "No availiable message ID, requeuing and sending packet (we already checked didn't we???)");
+								if(!wasGeneratedPing) {
+									messageQueue.pushfrontPrioritizedMessageItem(item);
+									// No point adding to queue if it's just a ping:
+									//  We will try again next time.
+									//  But odds are the connection is broken and the other side isn't responding...
+								}
+								break fragments;
+							}
+							
+							if(logDEBUG) Logger.debug(this, "Allocated "+messageID+" for "+item+" for "+this);
+							
+							MessageWrapper wrapper = new MessageWrapper(item, messageID);
+							MessageFragment frag = wrapper.getMessageFragment(maxPacketSize - packet.getLength());
+							if(frag == null) {
+								messageQueue.pushfrontPrioritizedMessageItem(item);
+								break prio;
+							}
+							packet.addMessageFragment(frag);
+							sentPacket.addFragment(frag);
+							
+							//Priority of the one we grabbed might be higher than i
+							HashMap<Integer, MessageWrapper> queue = startedByPrio.get(item.getPriority());
+							synchronized(sendBufferLock) {
+								// CONCURRENCY: This could go over the limit if we allow createPacket() for the same node on two threads in parallel. That's probably a bad idea anyway.
+								sendBufferUsed += item.buf.length;
+								if(logDEBUG) Logger.debug(this, "Added " + item.buf.length + " to remote buffer. Total is now " + sendBufferUsed + " for "+pn.shortToString());
+								queue.put(messageID, wrapper);
+							}
+							
+							if(wrapper.allSent()) {
+								if((haveAddedStatsBulk == null) && wrapper.getItem().sendLoadBulk) {
+									addStatsBulk = true;
+									break;
+								}
+								if((haveAddedStatsRT == null) && wrapper.getItem().sendLoadRT) {
+									addStatsRT = true;
+									break;
+								}
+							}
+
+						}
+						
+						if(!(addStatsBulk || addStatsRT)) break;
+						
+						if(addStatsBulk) {
+							MessageItem item = pn.makeLoadStats(false, false, true);
+							if(item != null) {
+								byte[] buf = item.getData();
+								haveAddedStatsBulk = item.buf;
+								// FIXME if this fails, drop some messages.
+								packet.addLossyMessage(buf, maxPacketSize);
+							}
+						}
+						
+						if(addStatsRT) {
+							MessageItem item = pn.makeLoadStats(true, false, true);
+							if(item != null) {
+								byte[] buf = item.getData();
+								haveAddedStatsRT = item.buf;
+								// FIXME if this fails, drop some messages.
+								packet.addLossyMessage(buf, maxPacketSize);
+							}
+						}
+						
+						if(cantSend) break;
+					}						
 				}
 			}
 		}
