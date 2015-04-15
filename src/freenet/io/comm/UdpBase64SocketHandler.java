@@ -281,15 +281,20 @@ public class UdpBase64SocketHandler extends UdpSocketHandler {
     {
         data = Base64.encode(data).getBytes();
     }
-    
-    private void BinToBase64(byte[] data)
+
+    private static final byte[] EMPTY_PACKET = {};
+    private byte[] BinToBase64(byte[] data)
     {
         try {
-            data = Base64.decode(data.toString());
+            data =  Base64.decode(data.toString());
         } catch (IllegalBase64Exception e) {
             Logger.error(this, "Caught " + e + " decoding Base64 packet", e);
+            //Logger.warning(this, "Dropping corrupted Based64 packet:" + new String(data));                
+            //return EMPTY_PACKET; we really need to deal with it in real life
             //throw new FSParseException(e);
         }
+
+        return data;
 
     }
 
