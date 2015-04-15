@@ -474,7 +474,7 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		negTypes = fs.getIntArray("auth.negTypes");
 		if(negTypes == null || negTypes.length == 0) {
 			if(fromAnonymousInitiator)
-				negTypes = FNPPacketMangler.staticSupportedNegTypes(false); // Assume compatible. Anonymous initiator = short-lived, and we already connected so we know we are.
+                negTypes = FNPPacketMangler.staticSupportedNegTypes(false); // Assume compatible. Anonymous initiator = short-lived, and we already connected so we know we are.
 			else
 				throw new FSParseException("No negTypes!");
 		}
@@ -920,18 +920,16 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	 */
 	@Override
 	public boolean isConnected() {
-		boolean isAnyTransportConnected = false;
+		isConnected = false;
 		for(String transportName : peerPacketTransportMap.keySet()) {
-			isAnyTransportConnected |= peerPacketTransportMap.get(transportName).isTransportConnected();
+			isConnected |= peerPacketTransportMap.get(transportName).isTransportConnected();
 		}
 		for(String transportName : peerStreamTransportMap.keySet()) {
-			isAnyTransportConnected |= peerStreamTransportMap.get(transportName).isTransportConnected();
+			isConnected |= peerStreamTransportMap.get(transportName).isTransportConnected();
 		}
-
-        long now = System.currentTimeMillis();
-        isConnected.set(isAnyTransportConnected, now);
-        
-		return isConnected.isTrue();
+		if(isConnected)
+			timeLastConnected = System.currentTimeMillis();
+		return isConnected;
 	}
 
 	/**
@@ -1743,19 +1741,10 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	public long getBootID() {
 		return bootID.get();
 	}
-
-
-    /**
-     * sets the new bootID and returns the old one
-     */
-	public long setBootID(long newBootID) {
-        return bootID.getAndSet(newBootID);
-        //oldBootID = bootID.getAndSet(thisBootID);
-        //bootIDChanged = oldBootID != thisBootID;
-		//this.bootID = bootID;
-        //use bootID.getAndSet instead like:
+	
+	public void setBootID(long bootID) {
+		this.bootID = bootID;
 	}
-    
 	
 	private final Object arkFetcherSync = new Object();
 
@@ -4840,16 +4829,6 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		}
 		return pf.handleReceivedPacket(buf, offset, length, now, replyTo);
 	}
-
-    public void setAcknowledgeType(int negType) {
-		useCumulativeAcks = (negType >= 10);
-	}
-
-    @Override
-	public boolean isUseCumulativeAcksSet() {
-		return useCumulativeAcks;
-	}
-
 
 	@Override
 	public void handleMessage(Message m) {

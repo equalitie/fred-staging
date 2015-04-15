@@ -987,7 +987,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		// Neg type 9 and later use ECDSA signature.
 		byte[] sig = (negType < 9 ? ctx.dsaSig : ctx.ecdsaSig);
 	    if(sig.length != getSignatureLength(negType))
-	        throw new IllegalStateException("This shouldn't happen: please report! We are attempting to send "+sig.length+" bytes of signature in JFK2! "+pn.getPeer());
+	        throw new IllegalStateException("This shouldn't happen: please report! We are attempting to send "+sig.length+" bytes of signature in JFK2! "+peerTransport.getAddress());
 		// replyTo.getPhysicalAddress().getBytes() is used.
 		// Otherwise authentication might fail consistently in some transports. 
 	    byte[] authenticator = HMAC.macWithSHA256(getTransientKey(),assembleJFKAuthenticator(myExponential, hisExponential, myNonce, nonceInitator, replyTo.getPhysicalAddress().getBytes()), HASH_LENGTH);
@@ -1132,14 +1132,14 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		    // At that point we don't know if it's "him"; let's check it out
 		    byte[] locallyExpectedExponentials =  assembleDHParams(hisExponential, peerTransport.pn.peerCryptoGroup);
 
-		    if(!DSA.verify(pn.peerPubKey, remoteSignature, new NativeBigInteger(1, SHA256.digest(locallyExpectedExponentials)), false)) {
-		        Logger.error(this, "The signature verification has failed in JFK(2)!! "+pn.getPeer());
+		    if(!DSA.verify(peerTransport.pn.peerPubKey, remoteSignature, new NativeBigInteger(1, SHA256.digest(locallyExpectedExponentials)), false)) {
+		        Logger.error(this, "The signature verification has failed in JFK(2)!! " + peerTransport.getAddress());
 		        return;
 		    }
 		} else {
 		    // Verify the ECDSA signature ; We are assuming that it's the curve we expect
 		    if(!ECDSA.verify(Curves.P256, peerTransport.pn.peerECDSAPubKey(), sig, hisExponential)) {
-	              if(pn.peerECDSAPubKeyHash() == null) {
+	              if(peerTransport.pn.peerECDSAPubKeyHash() == null) {
 	            	  // FIXME remove when remove DSA support.
 	            	  // Caused by nodes running broken early versions of negType9.
 	            	  Logger.error(this, "Peer attempting negType "+negType+" with ECDSA but no ECDSA key known: "+peerTransport.pn.userToString());
@@ -1147,7 +1147,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 	              }
 		    	  Logger.error(this, "The ECDSA signature verification has failed in JFK(2)!! "+peerTransport.getAddress());
 	              if(logDEBUG) Logger.debug(this, "Expected signature on "+HexUtil.bytesToHex(hisExponential)+
-	            		  " with "+HexUtil.bytesToHex(pn.peerECDSAPubKeyHash())+
+	            		  " with "+HexUtil.bytesToHex(peerTransport.pn.peerECDSAPubKeyHash())+
 	            		  " signature "+HexUtil.bytesToHex(sig));
 	              return;
 		    }
@@ -1406,7 +1406,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
             System.arraycopy(sig, Node.SIGNATURE_PARAMETER_LENGTH, s, 0, Node.SIGNATURE_PARAMETER_LENGTH);
 		    DSASignature remoteSignature = new DSASignature(new NativeBigInteger(1,r), new NativeBigInteger(1,s));
 		    if(!DSA.verify(pn.peerPubKey, remoteSignature, new NativeBigInteger(1, SHA256.digest(toVerify)), false)) {
-		        Logger.error(this, "The signature verification has failed!! JFK(3) - "+pn.getPeer());
+		        Logger.error(this, "The signature verification has failed!! JFK(3) - "+peerTransport.getAddress());
 		        return;
 		    }
 		} else {
@@ -1475,7 +1475,10 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 				ivNonce, ourInitialSeqNum, theirInitialSeqNum, ourInitialMsgID, theirInitialMsgID, sock);
 
 		// Set acknowledging method acording to negType
-		pn.setAcknowledgeType(negType);
+		//pn.setAcknowledgeType(negType);
+
+        // At this point we know it's from the peer, so we can report a packet received.
+		peerTransport.receivedPacket(true, false);
 		
 		if(newTrackerID > 0) {
 
@@ -1650,7 +1653,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		int nonceSize = getNonceSize(negType);
 		int nonceSizeHashed = (negType > 8 ? HASH_LENGTH : nonceSize);
 	    byte[] identity = crypto.getIdentity(negType, unknownInitiator);
-		byte[] locallyGeneratedText = new byte[nonceSizeHashed + nonceSize + modulusLength * 2 + identity.length + dataLen + pn.jfkMyRef.length];
+		byte[] locallyGeneratedText = new byte[nonceSizeHashed + nonceSize + modulusLength * 2 + identity.length + dataLen + peerTransport.jfkMyRef.length];
 		int bufferOffset = nonceSizeHashed + nonceSize + modulusLength*2;
 		System.arraycopy(jfkBuffer, 0, locallyGeneratedText, 0, bufferOffset);
 		System.arraycopy(identity, 0, locallyGeneratedText, bufferOffset, identity.length);
@@ -1713,7 +1716,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 			dontWant = true;
 		}
 		// Set acknowledging method acording to negType
-		pn.setAcknowledgeType(negType);
+		peerTransport.pn.setAcknowledgeType(negType);
 
 		// We change the key
 		BlockCipher ivCipher = null;
@@ -2151,7 +2154,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		Util.randomBytes(node.fastWeakRandom, data, hash.length+iv.length+2+output.length, paddingLength);
 		try {
 			sendPacket(data, replyTo, peerTransport);
-			node.nodeStats.reportAuthBytes(data.length + sock.getHeadersLength(replyTo));
+			node.nodeStats.reportAuthBytes(data.length + sock.getHeadersLength());
 		} catch (LocalAddressException e) {
 			Logger.warning(this, "Tried to send auth packet to local address: "+replyTo+" for "+peerTransport+" - maybe you should set allowLocalAddresses for this peer??");
 		}
@@ -2268,8 +2271,20 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 	
 	static UserAlert BCPROV_LOAD_FAILED = null;
 
+    /**
+	 * List of supported negotiation types in preference order (best last)
+	 * Assumes bcProv loaded successfully.
+	 * This method must eventually be moved out 
+	 * as it is common to both streams and packets
+	 */
 	@Override
 	public int[] supportedNegTypes(boolean forPublic) {
+		return new int[] { 9, 10 };
+	}
+
+    //vmon: till I figure out how to get the mangler from the transportPlugin in
+    //PeerNode we need a static supportednegType
+	public static int[] staticSupportedNegTypes(boolean forPublic) {
 		return new int[] { 9, 10 };
 	}
 

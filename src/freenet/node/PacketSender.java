@@ -634,7 +634,7 @@ public class PacketSender implements Runnable {
 			return getShortText();
 		}
 
-        @Override
+        //@Override vmon: not in AbstractUserAlert anymore probably discountinued
 		public Object getUserIdentifier() {
 			return PacketSender.this;
 		}

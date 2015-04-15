@@ -8,6 +8,9 @@ import freenet.pluginmanager.FaultyTransportPluginException;
 import freenet.pluginmanager.PacketTransportPluginFactory;
 import freenet.pluginmanager.StreamTransportPluginFactory;
 
+import freenet.pluginmanager.PacketPluginCallback;
+import freenet.pluginmanager.StreamPluginCallback;
+
 public class RegisteredTransportManager {
 	
 	private final Node node;

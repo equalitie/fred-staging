@@ -28,13 +28,16 @@ import freenet.pluginmanager.MalformedPluginAddressException;
 import freenet.pluginmanager.PacketTransportPlugin;
 import freenet.pluginmanager.PluginAddress;
 import freenet.support.Logger;
-import freenet.support.OOMHandler;
+//import freenet.support.OOMHandler;
 import freenet.support.io.NativeThread;
 import freenet.support.transport.ip.HostnameSyntaxException;
 import freenet.support.transport.ip.IPUtil;
 
 import freenet.io.comm.UdpSocketHandler; //Parent class
-import org.apache.commons.codec.binary.Base64; //To use in encoding
+import freenet.support.Base64;
+import freenet.support.IllegalBase64Exception;
+//import org.apache.commons.codec.binary.Base64; //To use in encoding: maybe we should use the in-house
+//base64 lib
 
 public class UdpBase64SocketHandler extends UdpSocketHandler {
 
@@ -181,7 +184,7 @@ public class UdpBase64SocketHandler extends UdpSocketHandler {
             _sock.send(packet);
             tracker.sentPacketTo(destination);
             boolean isLocal = (!IPUtil.isValidAddress(address, false)) && (IPUtil.isValidAddress(address, true));
-            collector.addInfo(address + ":" + port, 0, blockToSend.length + UDP_HEADERS_LENGTH, isLocal);
+            collector.addInfo(address, port, 0, blockToSend.length + UDP_HEADERS_LENGTH, isLocal);
             if(logMINOR) Logger.minor(this, "Sent packet length "+blockToSend.length+" to "+address+':'+port);
         } catch (IOException e) {
             if(packet.getAddress() instanceof Inet6Address) {
@@ -272,14 +275,22 @@ public class UdpBase64SocketHandler extends UdpSocketHandler {
         node.executor.execute(this, "UdpBase64SocketHandler for port "+listenPort);
     }
 
+    //Using the
+    //Base64 libary of freenet
     private void Base64ToBin(byte[] data)
     {
-        data = Base64.encodeBase64(data);
+        data = Base64.encode(data).getBytes();
     }
     
     private void BinToBase64(byte[] data)
     {
-        data = Base64.decodeBase64(data);
+        try {
+            data = Base64.decode(data.toString());
+        } catch (IllegalBase64Exception e) {
+            Logger.error(this, "Caught " + e + " decoding Base64 packet", e);
+            //throw new FSParseException(e);
+        }
+
     }
 
 }

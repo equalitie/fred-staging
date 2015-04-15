@@ -497,7 +497,8 @@ public class NodeCrypto {
 
 	SimpleFieldSet exportPublicCryptoFieldSet(boolean forSetup, boolean forAnonInitiator) {
 		SimpleFieldSet fs = new SimpleFieldSet(true);
-		int[] negTypes = FNPPacketMangler.supportedNegTypes(true);
+		int[] negTypes = FNPPacketMangler.staticSupportedNegTypes(true); //mangler.supportedNegTypes(true); this should come again from the transportPulgin.outgoingMangler
+            
 		if(!(forSetup || forAnonInitiator))
 			// Can't change on setup.
 			// Anonymous initiator doesn't need identity as we don't use it.

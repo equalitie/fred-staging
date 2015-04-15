@@ -57,7 +57,6 @@ import freenet.support.io.RandomAccessThing;
 
 public class DarknetPeerNode extends PeerNode {
 	
-	
 
 	/** Name of this node */
 	String myName;

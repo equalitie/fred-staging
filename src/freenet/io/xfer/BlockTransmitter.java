@@ -581,7 +581,8 @@ public class BlockTransmitter {
 	};
 	
 	private void onDisconnect() {
-		Logger.normal(this, "Terminating send "+_uid+" to "+_destination+" from "+_destination.getSocketHandler()+" because node disconnected while waiting");
+        //TODO:: Figure out the equvalent in transport plugin for getSocketHandler()
+		Logger.normal(this, "Terminating send "+_uid+" to "+_destination+/*" from "+_destination.getSocketHandler()+*/" because node disconnected while waiting");
 		//They disconnected, can't send an abort to them then can we?
 		Future fail;
 		synchronized(_senderThread) {

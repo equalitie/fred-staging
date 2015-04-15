@@ -15,6 +15,9 @@ import freenet.pluginmanager.TransportPluginConfigurationException;
 import freenet.pluginmanager.TransportPluginException;
 import freenet.support.Logger;
 import freenet.support.SimpleFieldSet;
+
+import freenet.pluginmanager.PacketPluginCallback;
+import freenet.pluginmanager.StreamPluginCallback;
 /**
  * This class maintains a record of packet transports and stream transports available. 
  * For every mode(opennet, darknet, etc.) a separate manager is created at the node
@@ -457,31 +460,5 @@ class NotifyPlugin implements Runnable {
 	@Override
 	public void run() {
 		transportPlugin.stopPlugin();
-	}
-}
-
-class PacketPluginCallback implements Runnable {
-	PacketTransportPluginFactory factory;
-	FaultyTransportPluginException e;
-	public PacketPluginCallback(PacketTransportPluginFactory factory, FaultyTransportPluginException e) {
-		this.factory = factory;
-		this.e = e;
-	}
-	@Override
-	public void run() {
-		factory.invalidTransportCallback(e);
-	}
-}
-
-class StreamPluginCallback implements Runnable {
-	StreamTransportPluginFactory factory;
-	FaultyTransportPluginException e;
-	public StreamPluginCallback(StreamTransportPluginFactory factory, FaultyTransportPluginException e) {
-		this.factory = factory;
-		this.e = e;
-	}
-	@Override
-	public void run() {
-		factory.invalidTransportCallback(e);
 	}
 }

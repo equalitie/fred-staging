@@ -71,6 +71,8 @@ public interface BasePeerNode extends PeerContext {
 	/** Report when we received an ack. */
 	void receivedAck(long currentTimeMillis, TransportPlugin transportPlugin);
 
+    //Vmon: This is new and wasn't in Chetan's branch
 	/** Report whether the node is capable of using cumacks. For backward compatibility issues */
 	boolean isUseCumulativeAcksSet();
+    
 }

@@ -16,10 +16,11 @@ import freenet.pluginmanager.PacketTransportPlugin;
  */
 public interface OutgoingPacketMangler extends OutgoingMangler {
 
-	/**
-	 * Size of the packet headers, in bytes, assuming only one message in this packet.
-	 */
-	public int fullHeadersLengthOneMessage();
+    //Vmon: exists in transport branch but discontinued in freenet
+	// /**
+	//  * Size of the packet headers, in bytes, assuming only one message in this packet.
+	//  */
+	// public int fullHeadersLengthOneMessage();
 
 	/**
 	 * List of supported negotiation types in preference order (best last)

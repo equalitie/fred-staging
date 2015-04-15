@@ -826,7 +826,7 @@ public abstract class PeerTransport {
 		public SessionKey unverifiedTracker = null;
 		
 		static final byte[] TEST_AS_BYTES = PeerNode.TEST_AS_BYTES;
-		static final int CHECK_FOR_SWAPPED_TRACKERS_INTERVAL = PeerNode.CHECK_FOR_SWAPPED_TRACKERS_INTERVAL;
+		static final long CHECK_FOR_SWAPPED_TRACKERS_INTERVAL = PeerNode.CHECK_FOR_SWAPPED_TRACKERS_INTERVAL;
 		
 	}
 		
