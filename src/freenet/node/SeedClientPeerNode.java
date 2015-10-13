@@ -8,6 +8,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 
 import freenet.io.comm.PeerParseException;
 import freenet.io.comm.ReferenceSignatureVerificationException;
+import freenet.node.TransportManager.TransportMode;
 import freenet.support.SimpleFieldSet;
 
 /**
@@ -16,8 +17,8 @@ import freenet.support.SimpleFieldSet;
  */
 public class SeedClientPeerNode extends PeerNode {
 
-	public SeedClientPeerNode(SimpleFieldSet fs, Node node2, NodeCrypto crypto, PeerManager peers, boolean fromLocal, boolean noSig, OutgoingPacketMangler mangler) throws FSParseException, PeerParseException, ReferenceSignatureVerificationException {
-		super(fs, node2, crypto, peers, fromLocal, noSig, mangler, true);
+	public SeedClientPeerNode(SimpleFieldSet fs, Node node2, NodeCrypto crypto, PeerManager peers, boolean fromLocal, boolean noSig) throws FSParseException, PeerParseException, ReferenceSignatureVerificationException {
+		super(fs, node2, crypto, peers, fromLocal, noSig, true);
 	}
 
 	@Override
@@ -91,8 +92,8 @@ public class SeedClientPeerNode extends PeerNode {
 	}
 
 	@Override
-	public boolean disconnected(boolean dumpMessageQueue, boolean dumpTrackers) {
-		boolean ret = super.disconnected(true, true);
+	public boolean disconnectPeer(boolean dumpMessageQueue, boolean dumpTrackers) {
+		boolean ret = super.disconnectPeer(true, true);
 		node.peers.disconnectAndRemove(this, false, false, false);
 		return ret;
 	}
@@ -172,5 +173,9 @@ public class SeedClientPeerNode extends PeerNode {
 		return true;
 	}
 
-
+	@Override
+	public TransportMode getMode() {
+		// SeedNodes use the same NodeCrypto
+		return TransportMode.opennet;
+	}
 }

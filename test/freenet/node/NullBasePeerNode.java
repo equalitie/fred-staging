@@ -9,12 +9,19 @@ import freenet.io.comm.Message;
 import freenet.io.comm.NotConnectedException;
 import freenet.io.comm.Peer;
 import freenet.io.comm.PeerContext;
-import freenet.io.comm.SocketHandler;
-import freenet.io.comm.Peer.LocalAddressException;
 import freenet.io.xfer.PacketThrottle;
+import freenet.pluginmanager.PacketTransportPlugin;
+import freenet.pluginmanager.TransportPlugin;
 
 /** Tests can override this to record specific events e.g. rekey */
 public class NullBasePeerNode implements BasePeerNode {
+	
+	private final PeerMessageQueue messageQueue;
+	private PeerMessageTracker pmt;
+	
+	public NullBasePeerNode() {
+		this.messageQueue = new PeerMessageQueue();
+	}
 
 	@Override
 	public Peer getPeer() {
@@ -58,16 +65,6 @@ public class NullBasePeerNode implements BasePeerNode {
 	}
 
 	@Override
-	public SocketHandler getSocketHandler() {
-		return null;
-	}
-
-	@Override
-	public OutgoingPacketMangler getOutgoingMangler() {
-		return null;
-	}
-
-	@Override
 	public WeakReference<? extends PeerContext> getWeakRef() {
 		return new WeakReference<NullBasePeerNode>(this);
 	}
@@ -86,45 +83,6 @@ public class NullBasePeerNode implements BasePeerNode {
 	public boolean unqueueMessage(MessageItem item) {
 		throw new UnsupportedOperationException();
 	}
-	
-	SessionKey currentKey;
-	SessionKey previousKey;
-	SessionKey unverifiedKey;
-
-	@Override
-	public SessionKey getCurrentKeyTracker() {
-		return currentKey;
-	}
-
-	@Override
-	public SessionKey getPreviousKeyTracker() {
-		return previousKey;
-	}
-
-	@Override
-	public SessionKey getUnverifiedKeyTracker() {
-		return unverifiedKey;
-	}
-
-	@Override
-	public void receivedPacket(boolean dontLog, boolean dataPacket) {
-		// Do nothing by default
-	}
-
-	@Override
-	public void verified(SessionKey s) {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public void startRekeying() {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public void maybeRekey() {
-		// Do nothing
-	}
 
 	@Override
 	public void reportIncomingBytes(int length) {
@@ -135,7 +93,7 @@ public class NullBasePeerNode implements BasePeerNode {
 	public void reportOutgoingBytes(int length) {
 		// Ignore
 	}
-
+	
 	protected void processDecryptedMessage(byte[] data, int offset, int length,
 			int overhead) {
 		throw new UnsupportedOperationException();
@@ -157,13 +115,13 @@ public class NullBasePeerNode implements BasePeerNode {
 	}
 
 	@Override
-	public int getMaxPacketSize() {
+	public int getMaxPacketSize(PacketTransportPlugin transportPlugin) {
 		return 1280;
 	}
 
 	@Override
 	public PeerMessageQueue getMessageQueue() {
-		return null;
+		return messageQueue;
 	}
 
 	@Override
@@ -172,12 +130,7 @@ public class NullBasePeerNode implements BasePeerNode {
 	}
 
 	@Override
-	public void sendEncryptedPacket(byte[] data) throws LocalAddressException {
-		// Do nothing
-	}
-
-	@Override
-	public void sentPacket() {
+	public void sentPacket(PacketTransportPlugin transportPlugin) {
 		// Do nothing
 	}
 
@@ -262,8 +215,16 @@ public class NullBasePeerNode implements BasePeerNode {
 	}
 
 	@Override
-	public void receivedAck(long currentTimeMillis) {
+	public void receivedAck(long currentTimeMillis, TransportPlugin transportPlugin) {
 		// Ignore
+	}
+
+	@Override
+	public PeerMessageTracker getPeerMessageTracker() {
+		if(pmt == null) {
+			pmt = new PeerMessageTracker(this, 0, 0);
+		}
+		return pmt;
 	}
 
 	@Override

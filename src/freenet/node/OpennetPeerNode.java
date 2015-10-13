@@ -6,6 +6,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import freenet.io.comm.PeerParseException;
 import freenet.io.comm.ReferenceSignatureVerificationException;
 import freenet.node.OpennetManager.ConnectionType;
+import freenet.node.TransportManager.TransportMode;
 import freenet.node.OpennetManager.LinkLengthClass;
 import freenet.node.updater.NodeUpdateManager;
 import freenet.node.updater.UpdateOverMandatoryManager;
@@ -276,6 +277,12 @@ public class OpennetPeerNode extends PeerNode {
 	boolean dontKeepFullFieldSet() {
 		return true;
 	}
+
+	@Override
+	public TransportMode getMode() {
+		return TransportMode.opennet;
+	}
+
 	
     public LinkLengthClass linkLengthClass() {
         if(!Location.isValid(getLocation())) {

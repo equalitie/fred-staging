@@ -4,6 +4,7 @@
 package freenet.node;
 
 import freenet.crypt.BlockCipher;
+import freenet.pluginmanager.TransportPlugin;
 
 /**
  * Class representing a single session key.
@@ -30,10 +31,11 @@ public class SessionKey {
 	final long trackerID;
 	
 	public final NewPacketFormatKeyContext packetContext;
+	public final TransportPlugin transportPlugin;
 
 	SessionKey(PeerNode parent, BlockCipher outgoingCipher, byte[] outgoingKey,
 	                BlockCipher incommingCipher, byte[] incommingKey, BlockCipher ivCipher,
-			byte[] ivNonce, byte[] hmacKey, NewPacketFormatKeyContext context, long trackerID) {
+			byte[] ivNonce, byte[] hmacKey, NewPacketFormatKeyContext context, long trackerID, TransportPlugin transportPlugin) {
 		this.pn = parent;
 		this.outgoingCipher = outgoingCipher;
 		this.outgoingKey = outgoingKey;
@@ -44,8 +46,9 @@ public class SessionKey {
 		this.hmacKey = hmacKey;
 		this.packetContext = context;
 		this.trackerID = trackerID;
+		this.transportPlugin = transportPlugin;
 	}
-	
+
 	public void disconnected() {
 		packetContext.disconnected();
 	}

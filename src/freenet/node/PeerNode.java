@@ -1867,69 +1867,25 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		return false;
 	}
 
-	/**
-	* IP on the other side appears to have changed...
-	* @param newPeer The new address of the peer.
-	*/
-	public void changedIP(Peer newPeer) {
-		setDetectedPeer(newPeer);
+	public void changedAddress(PluginAddress newAddress, TransportPlugin transportPlugin) {
+		setDetectedAddress(newAddress, transportPlugin);
 	}
-
-	private void setDetectedPeer(Peer newPeer) {
-		// Also, we need to call .equals() to propagate any DNS lookups that have been done if the two have the same domain.
-		Peer p = newPeer;
-		newPeer = newPeer.dropHostName();
-		if(newPeer == null) {
-			Logger.error(this, "Impossible: No address for detected peer! "+p+" on "+this);
-			return;
-		}
-		synchronized(this) {
-			Peer oldPeer = detectedPeer;
-			if((newPeer != null) && ((oldPeer == null) || !oldPeer.equals(newPeer))) {
-				this.detectedPeer = newPeer;
-				updateShortToString();
-				// IP has changed, it is worth looking up the DNS address again.
-				this.lastAttemptedHandshakeIPUpdateTime = 0;
-				if(!isConnected())
-					return;
-			} else
-				return;
-		}
-		getThrottle().maybeDisconnected();
-		sendIPAddressMessage();
-	}
-
-	/**
-	* @return The current primary SessionKey, or null if we
-	* don't have one.
-	*/
-	@Override
-	public synchronized SessionKey getCurrentKeyTracker() {
-		return currentTracker;
-	}
-
-	/**
-	* @return The previous primary SessionKey, or null if we
-	* don't have one.
-	*/
-	@Override
-	public synchronized SessionKey getPreviousKeyTracker() {
-		return previousTracker;
-	}
-
-	/**
-	* @return The unverified SessionKey, if any, or null if we
-	* don't have one. The caller MUST call verified(KT) if a
-	* decrypt succeeds with this KT.
-	*/
-	@Override
-	public synchronized SessionKey getUnverifiedKeyTracker() {
-		return unverifiedTracker;
+	
+	private void setDetectedAddress(PluginAddress newAddress, TransportPlugin transportPlugin) {
+		PeerTransport peerTransport = getPeerTransport(transportPlugin);
+		if(peerTransport != null)
+			peerTransport.setDetectedAddress(newAddress);
+		
+		// Backwards compatibility. Since old nodes don't understand PluginAddress (Peer is the old address), 
+		// we need to update that as well.
+		if(peerTransport.transportName == "udp" && (newAddress instanceof PeerPluginAddress))
+			detectedPeer = ((PeerPluginAddress)newAddress).peer;
 	}
 
 	private String shortToString;
 	private void updateShortToString() {
-		shortToString = super.toString() + '@' + detectedPeer + '@' + HexUtil.bytesToHex(pubKeyHash);
+		shortToString = super.toString() + '@' + HexUtil.bytesToHex(pubKeyHash);
+		//I have gotten rid of detectedPeer since we are using multiple transports.
 	}
 
 	/**
@@ -1956,34 +1912,9 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	* @param dataPacket If this is a real packet, as opposed to a handshake packet.
 	*/
 	@Override
-	public void receivedPacket(boolean dontLog, boolean dataPacket) {
-		synchronized(this) {
-			if((!isConnected()) && (!dontLog)) {
-				// Don't log if we are disconnecting, because receiving packets during disconnecting is normal.
-				// That includes receiving packets after we have technically disconnected already.
-				// A race condition involving forceCancelDisconnecting causing a mistaken log message anyway
-				// is conceivable, but unlikely...
-				if((unverifiedTracker == null) && (currentTracker == null) && !disconnecting)
-					Logger.error(this, "Received packet while disconnected!: " + this, new Exception("error"));
-				else
-					if(logMINOR)
-						Logger.minor(this, "Received packet while disconnected on " + this + " - recently disconnected() ?");
-			} else {
-				if(logMINOR) Logger.minor(this, "Received packet on "+this);
-			}
-		}
-		long now = System.currentTimeMillis();
-		synchronized(this) {
-			timeLastReceivedPacket = now;
-			if(dataPacket)
-				timeLastReceivedDataPacket = now;
-		}
-	}
-	
-	@Override
-	public synchronized void receivedAck(long now) {
-		if(timeLastReceivedAck < now)
-			timeLastReceivedAck = now;
+	public synchronized void receivedAck(long now, TransportPlugin transportPlugin) {
+		PeerTransport peerTransport = getPeerTransport(transportPlugin);
+		peerTransport.receivedAck(now);
 	}
 
 	/**
@@ -1991,7 +1922,9 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	*/
 	@Override
 	public void sentPacket() {
-		timeLastSentPacket = System.currentTimeMillis();
+	public void sentPacket(PacketTransportPlugin transportPlugin) {
+		PeerPacketTransport peerTransport = getPeerTransport(transportPlugin);
+		peerTransport.sentPacket();
 	}
 
 	public synchronized KeyAgreementSchemeContext getKeyAgreementSchemeContext() {
@@ -2039,7 +1972,15 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	* @return The ID of the new PacketTracker. If this is different to the passed-in trackerID, then
 	* it's a new tracker. -1 to indicate failure.
 	*/
-	public long completedHandshake(long thisBootID, byte[] data, int offset, int length, BlockCipher outgoingCipher, byte[] outgoingKey, BlockCipher incommingCipher, byte[] incommingKey, Peer replyTo, boolean unverified, int negType, long trackerID, boolean isJFK4, boolean jfk4SameAsOld, byte[] hmacKey, BlockCipher ivCipher, byte[] ivNonce, int ourInitialSeqNum, int theirInitialSeqNum, int ourInitialMsgID, int theirInitialMsgID) {
+	public long completedHandshake(long thisBootID, byte[] data, int offset, int length, BlockCipher outgoingCipher, byte[] outgoingKey, BlockCipher incommingCipher, byte[] incommingKey, PluginAddress replyTo, boolean unverified, int negType, long trackerID, boolean isJFK4, boolean jfk4SameAsOld, byte[] hmacKey, BlockCipher ivCipher, byte[] ivNonce, int ourInitialSeqNum, int theirInitialSeqNum, int ourInitialMsgID, int theirInitialMsgID, TransportPlugin transportPlugin) {
+		/*
+		 * PeerNode specific code
+		 */
+		
+		// Create the pmt (PeerMessageTracker) only once
+		if(pmt == null)
+			pmt = new PeerMessageTracker(this, ourInitialMsgID, theirInitialMsgID);
+		
 		long now = System.currentTimeMillis();
 		if(logMINOR) Logger.minor(this, "Tracker ID "+trackerID+" isJFK4="+isJFK4+" jfk4SameAsOld="+jfk4SameAsOld);
 		if(trackerID < 0) trackerID = Math.abs(node.random.nextLong());
@@ -2047,7 +1988,7 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		// Update sendHandshakeTime; don't send another handshake for a while.
 		// If unverified, "a while" determines the timeout; if not, it's just good practice to avoid a race below.
 		if(!(isSeed() && this instanceof SeedServerPeerNode))
-                    calcNextHandshake(true, true, false);
+                    calcNextHandshake(true, true, false, transportPlugin);
 		stopARKFetcher();
 		try {
 			// First, the new noderef
@@ -2056,7 +1997,10 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 			synchronized(this) {
 				bogusNoderef = true;
 				// Disconnect, something broke
-				isConnected.set(false, now);
+				PeerTransport peerTransport = getPeerTransport(transportPlugin);
+				if(peerTransport != null)
+					peerTransport.isTransportConnected = false;
+				isConnected();
 			}
 			Logger.error(this, "Failed to parse new noderef for " + this + ": " + e1, e1);
 			node.peers.disconnected(this);
@@ -2086,39 +2030,38 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 			routable = false;
 		} else
 			older = false;
-		changedIP(replyTo);
-		boolean bootIDChanged = false;
-		boolean wasARekey = false;
-		SessionKey oldPrev = null;
-		SessionKey oldCur = null;
-		SessionKey newTracker;
-		MessageItem[] messagesTellDisconnected = null;
-		PacketFormat oldPacketFormat = null;
+		
+		changedAddress(replyTo, transportPlugin);
+		/*
+		 * PeerNode specific code ends
+		 */
+		
+		maybeSendInitialMessages();
+		
+		String transportName = transportPlugin.transportName;
+		long newID;
 		synchronized(this) {
-			disconnecting = false;
-			// FIXME this shouldn't happen, does it?
-			if(currentTracker != null) {
-				if(Arrays.equals(outgoingKey, currentTracker.outgoingKey)
-						&& Arrays.equals(incommingKey, currentTracker.incommingKey)) {
-					Logger.error(this, "completedHandshake() with identical key to current, maybe replayed JFK(4)?");
-					return -1;
-				}
+			if(peerPacketTransportMap.containsKey(transportName)) {
+				PeerPacketTransport peerTransport = peerPacketTransportMap.get(transportName);
+				newID = peerTransport.completedHandshake(thisBootID, outgoingCipher, outgoingKey, incommingCipher, incommingKey, replyTo, unverified, negType, trackerID, isJFK4, jfk4SameAsOld, hmacKey, ivCipher, ivNonce, ourInitialSeqNum, theirInitialSeqNum, now, newer, older);
 			}
-			if(previousTracker != null) {
-				if(Arrays.equals(outgoingKey, previousTracker.outgoingKey)
-						&& Arrays.equals(incommingKey, previousTracker.incommingKey)) {
-					Logger.error(this, "completedHandshake() with identical key to previous, maybe replayed JFK(4)?");
-					return -1;
-				}
+			else if(peerStreamTransportMap.containsKey(transportName)) {
+				PeerStreamTransport peerTransport = peerStreamTransportMap.get(transportName);
+				newID = peerTransport.completedHandshake();
 			}
-			if(unverifiedTracker != null) {
-				if(Arrays.equals(outgoingKey, unverifiedTracker.outgoingKey)
-						&& Arrays.equals(incommingKey, unverifiedTracker.incommingKey)) {
-					Logger.error(this, "completedHandshake() with identical key to unverified, maybe replayed JFK(4)?");
-					return -1;
-				}
-			}
-			handshakeCount = 0;
+			else
+				newID = -1; //Situation not possible
+			
+			if(newID == -1)
+				return -1;
+			/*
+			 * Finish up some tasks at PeerNode level (not transport specific),
+			 * only if the completedHandshake above returned a successful newID.
+			 * I have gone through these variables and are not affected
+			 * if changed after calling PeerTransport.completedHandshake method.
+			 * We need to test more since some fields are changed there.
+			 * Check previous version of PeerNode.
+			 */
 			bogusNoderef = false;
 			// Don't reset the uptime if we rekey
 			if(!isConnected()) {
@@ -2246,9 +2189,8 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 			maybeOnConnect();
 		}
 		
-		crypto.maybeBootConnection(this, replyTo.getFreenetAddress());
-
-		return trackerID;
+		return newID;
+		
 	}
 
 	protected abstract void maybeClearPeerAddedTimeOnConnect();
@@ -2257,6 +2199,11 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	public long getBootID() {
 		return bootID.get();
 	}
+	
+	public void setBootID(long bootID) {
+		this.bootID = bootID;
+	}
+	
 	private final Object arkFetcherSync = new Object();
 
 	void startARKFetcher() {
@@ -2312,19 +2259,32 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		return RequestStarter.IMMEDIATE_SPLITFILE_PRIORITY_CLASS;
 	}
 
-	boolean sentInitialMessages;
-
-	void maybeSendInitialMessages() {
-		synchronized(this) {
-			if(sentInitialMessages)
-				return;
-			if(currentTracker != null)
-				sentInitialMessages = true;
-			else
-				return;
+	void maybeSendInitialMessages(TransportPlugin transportPlugin) {
+		PeerTransport peerTransport = getPeerTransport(transportPlugin);
+		if(peerTransport == null)
+			return;
+		if(peerTransport.shouldSendInitialMessages())
+			sendInitialMessages();
+	}
+	/**
+	 * Make sure all of them have have sent messages,
+	 * since every time a transport connects various fields change and we need to update.
+	 * @return sentInitialMessages, whether we must send or not
+	 */
+	public void maybeSendInitialMessages() {
+		boolean sentInitialMessages = true;
+		synchronized(packetTransportMapLock) {
+			for(String transportName : peerPacketTransportMap.keySet()) {
+				sentInitialMessages &= !(peerPacketTransportMap.get(transportName).shouldSendInitialMessages());
+			}
 		}
-
-		sendInitialMessages();
+		synchronized(streamTransportMapLock) {
+			for(String transportName : peerStreamTransportMap.keySet()) {
+				sentInitialMessages &= !(peerStreamTransportMap.get(transportName).shouldSendInitialMessages());
+			}
+		}
+		if(!sentInitialMessages)
+			sendInitialMessages();
 	}
 
 	/**
@@ -2343,58 +2303,23 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 			if(isRealConnection())
 				sendAsync(locMsg, null, node.nodeStats.initialMessagesCtr);
 			sendAsync(ipMsg, null, node.nodeStats.initialMessagesCtr);
+			/** Send IP message for each transport separately */
+			for(String transportName : peerPacketTransportMap.keySet()) {
+				sendAsync(peerPacketTransportMap.get(transportName).getIPAddressMessage(), null, node.nodeStats.initialMessagesCtr);
+			}
+			for(String transportName : peerStreamTransportMap.keySet()) {
+				sendAsync(peerStreamTransportMap.get(transportName).getIPAddressMessage(), null, node.nodeStats.initialMessagesCtr);
+			}
 			sendAsync(timeMsg, null, node.nodeStats.initialMessagesCtr);
 			sendAsync(dRoutingMsg, null, node.nodeStats.initialMessagesCtr);
 			sendAsync(uptimeMsg, null, node.nodeStats.initialMessagesCtr);
 		} catch(NotConnectedException e) {
-			Logger.error(this, "Completed handshake with " + getPeer() + " but disconnected (" + isConnected + ':' + currentTracker + "!!!: " + e, e);
+			Logger.error(this, "Completed handshake with " + this + " but disconnected " + e, e);
 		}
 
 		if(isRealConnection())
 			node.nodeUpdater.maybeSendUOMAnnounce(this);
 		sendConnectedDiffNoderef();
-	}
-
-	private void sendIPAddressMessage() {
-		Message ipMsg = DMT.createFNPDetectedIPAddress(detectedPeer);
-		try {
-			sendAsync(ipMsg, null, node.nodeStats.changedIPCtr);
-		} catch(NotConnectedException e) {
-			Logger.normal(this, "Sending IP change message to " + this + " but disconnected: " + e, e);
-		}
-	}
-
-	/**
-	* Called when a packet is successfully decrypted on a given
-	* SessionKey for this node. Will promote the unverifiedTracker
-	* if necessary.
-	*/
-	@Override
-	public void verified(SessionKey tracker) {
-		long now = System.currentTimeMillis();
-		SessionKey completelyDeprecatedTracker;
-		synchronized(this) {
-			if(tracker == unverifiedTracker) {
-				if(logMINOR)
-					Logger.minor(this, "Promoting unverified tracker " + tracker + " for " + getPeer());
-				completelyDeprecatedTracker = previousTracker;
-				previousTracker = currentTracker;
-				currentTracker = unverifiedTracker;
-				unverifiedTracker = null;
-				isConnected.set(true, now);
-				neverConnected = false;
-				maybeClearPeerAddedTimeOnConnect();
-				ctx = null;
-			} else
-				return;
-		}
-		maybeSendInitialMessages();
-		setPeerNodeStatus(now);
-		node.peers.addConnectedPeer(this);
-		maybeOnConnect();
-		if(completelyDeprecatedTracker != null) {
-			completelyDeprecatedTracker.disconnected();
-		}
 	}
 
 	private synchronized boolean invalidVersion() {
@@ -2634,55 +2559,17 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 			}
 		}
 		try {
-			String physical[] = fs.getAll("physical.udp");
-			if(physical != null) {
-				List<Peer> oldNominalPeer = nominalPeer;
-
-				nominalPeer = new ArrayList<Peer>(physical.length);
-
-				Peer[] oldPeers = oldNominalPeer.toArray(new Peer[oldNominalPeer.size()]);
-
-				for(String phys: physical) {
-					Peer p;
-					try {
-						p = new Peer(phys, true, true);
-					} catch(HostnameSyntaxException e) {
-						Logger.error(this, "Invalid hostname or IP Address syntax error while parsing new peer reference: " + phys);
-						continue;
-					} catch (PeerParseException e) {
-						Logger.error(this, "Invalid hostname or IP Address syntax error while parsing new peer reference: " + phys);
-						continue;
-					} catch (UnknownHostException e) {
-						// Should be impossible???
-						Logger.error(this, "Invalid hostname or IP Address syntax error while parsing new peer reference: " + phys);
-						continue;
-					}
-					if(!nominalPeer.contains(p)) {
-						if(oldNominalPeer.contains(p)) {
-							// Do nothing
-							// .contains() will .equals() on each, and equals() will propagate the looked-up IP if necessary.
-							// This is obviously O(n^2), but it doesn't matter, there will be very few peers.
-						}
-						nominalPeer.add(p);
-					}
-				}
-				// XXX should we trigger changedAnything on *any* change, or on just *addition* of new addresses
-				if(!Arrays.equals(oldPeers, nominalPeer.toArray(new Peer[nominalPeer.size()]))) {
-					changedAnything = true;
-					if(logMINOR) Logger.minor(this, "Got new physical.udp for "+this+" : "+Arrays.toString(nominalPeer.toArray()));
-					// Look up the DNS names if any ASAP
-					lastAttemptedHandshakeIPUpdateTime = 0;
-					// Clear nonces to prevent leak. Will kill any in-progress connect attempts, but that is okay because
-					// either we got an ARK which changed our peers list, or we just connected.
-					jfkNoncesSent.clear();
-				}
-
+			SimpleFieldSet transports = fs.subset("physical");
+			// Purge all addresses since it is a new noderef
+			if(transports != null) {
+				setTransportAddress(transports, false, true);
+				changedAnything = true;
 			} else if(forARK || forFullNodeRef) {
 				// Connection setup doesn't include a physical.udp.
 				// Differential noderefs only include it on the first one after connect.
-				Logger.error(this, "ARK noderef has no physical.udp for "+this+" : forDiffNodeRef="+forDiffNodeRef+" forARK="+forARK);
+				Logger.error(this, "ARK noderef has no physical for "+this+" : forDiffNodeRef="+forDiffNodeRef+" forARK="+forARK);
 				if(forFullNodeRef)
-					throw new FSParseException("ARK noderef has no physical.udp");
+					throw new FSParseException("ARK noderef has no physical");
 			}
 		} catch(Exception e1) {
 			Logger.error(this, "Caught "+e1, e1);
@@ -2785,15 +2672,30 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	*/
 	public synchronized SimpleFieldSet exportMetadataFieldSet(long now) {
 		SimpleFieldSet fs = new SimpleFieldSet(true);
-		if(detectedPeer != null)
-			fs.putSingle("detected.udp", detectedPeer.toStringPrefNumeric());
-		if(lastReceivedPacketTime() > 0)
-			fs.put("timeLastReceivedPacket", timeLastReceivedPacket);
-		if(lastReceivedAckTime() > 0)
-			fs.put("timeLastReceivedAck", timeLastReceivedAck);
-		long timeLastConnected = isConnected.getTimeLastTrue(now);
-		if(timeLastConnected > 0)
-			fs.put("timeLastConnected", timeLastConnected);
+		/*
+		 * Add information for all transports.
+		 */
+		for(String transportName:peerPacketTransportMap.keySet()){
+			PeerPacketTransport peerTransport = peerPacketTransportMap.get(transportName);
+			if(peerTransport.detectedTransportAddress != null)
+				fs.putOverwrite("detected." + transportName, peerTransport.detectedTransportAddress.toString());
+			if(peerTransport.lastSentTransportPacketTime() > 0)
+				fs.put("timeLastReceivedPacket." + transportName, peerTransport.timeLastReceivedTransportPacket);
+			if(peerTransport.lastReceivedTransportAckTime() > 0)
+				fs.put("timeLastReceivedAck." + transportName, peerTransport.timeLastReceivedTransportAck);
+			if(peerTransport.timeLastConnectedTransport() > 0)
+				fs.put("timeLastConnected." + transportName, peerTransport.timeLastConnectedTransport);
+		}
+		for(String transportName:peerStreamTransportMap.keySet()){
+			PeerStreamTransport peerTransport = peerStreamTransportMap.get(transportName);
+			if(peerTransport.detectedTransportAddress != null)
+				fs.putOverwrite("detected." + transportName, peerTransport.detectedTransportAddress.toString());
+			if(peerTransport.lastReceivedTransportAckTime() > 0)
+				fs.put("timeLastReceivedAck." + transportName, peerTransport.timeLastReceivedTransportAck);
+			if(peerTransport.timeLastConnectedTransport() > 0)
+				fs.put("timeLastConnected." + transportName, peerTransport.timeLastConnectedTransport);
+		}
+		
 		if(timeLastRoutable() > 0)
 			fs.put("timeLastRoutable", timeLastRoutable);
 		if(getPeerAddedTime() > 0 && shouldExportPeerAddedTime())
@@ -2848,8 +2750,19 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		SimpleFieldSet fs = new SimpleFieldSet(true);
 		if(getLastGoodVersion() != null)
 			fs.putSingle("lastGoodVersion", lastGoodVersion);
-		for(int i = 0; i < nominalPeer.size(); i++)
-			fs.putAppend("physical.udp", nominalPeer.get(i).toString());
+		/*
+		 * Add physical location (nominal peer) for all transports.
+		 */
+		for(String transportName:peerPacketTransportMap.keySet()){
+			PeerPacketTransport peerTransport = peerPacketTransportMap.get(transportName);
+			for(PluginAddress address : peerTransport.nominalTransportAddress)
+				fs.putAppend("physical." + transportName, address.toStringAddress());
+		}
+		for(String transportName:peerStreamTransportMap.keySet()){
+			PeerStreamTransport peerTransport = peerStreamTransportMap.get(transportName);
+			for(PluginAddress address : peerTransport.nominalTransportAddress)
+				fs.putAppend("physical." + transportName, address.toStringAddress());
+		}
 		fs.put("auth.negTypes", negTypes);
 		fs.putSingle("identity", getIdentityString());
 		fs.put("location", getLocation());
@@ -2879,6 +2792,8 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	public abstract boolean isOpennet();
 
 	public abstract boolean isSeed();
+	
+	public abstract TransportMode getMode();
 
 	/**
 	* @return The time at which we last connected (or reconnected).
@@ -3283,6 +3198,22 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 
 	public void setRemoteDetectedPeer(Peer p) {
 		this.remoteDetectedPeer = p;
+	}
+	
+	public void setRemoteDetectedTransportAddress(byte[] address, String transportName) throws TransportPluginException, MalformedPluginAddressException{
+		synchronized(packetTransportMapLock) {
+			if(peerPacketTransportMap.containsKey(transportName)) {
+				PeerTransport peerTransport = peerPacketTransportMap.get(transportName);
+				peerTransport.detectedTransportAddress = peerTransport.transportPlugin.toPluginAddress(address);
+			}
+		}
+		synchronized(streamTransportMapLock) {
+			if(peerStreamTransportMap.containsKey(transportName)) {
+				PeerTransport peerTransport = peerStreamTransportMap.get(transportName);
+				peerTransport.detectedTransportAddress = peerTransport.transportPlugin.toPluginAddress(address);
+			}
+		}
+		throw new TransportPluginException("Plugin not found");
 	}
 
 	public Peer getRemoteDetectedPeer() {
@@ -3797,7 +3728,7 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	 */
 	public int selectNegType(OutgoingPacketMangler mangler) {
 		int[] hisNegTypes;
-		int[] myNegTypes = mangler.supportedNegTypes(false);
+		int[] myNegTypes = FNPPacketMangler.supportedNegTypes(false);
 		boolean supportECDSA;
 		synchronized(this) {
 			hisNegTypes = negTypes;
@@ -3847,14 +3778,12 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		}
 	}
 
-	@Override
-	public OutgoingPacketMangler getOutgoingMangler() {
-		return outgoingMangler;
+	public OutgoingPacketMangler getOutgoingMangler(PacketTransportPlugin transportPlugin){
+		return peerPacketTransportMap.get(transportPlugin.transportName).outgoingMangler;
 	}
-
-	@Override
-	public SocketHandler getSocketHandler() {
-		return outgoingMangler.getSocketHandler();
+	
+	public OutgoingStreamMangler getOutgoingMangler(StreamTransportPlugin transportPlugin){
+		return peerStreamTransportMap.get(transportPlugin.transportName).outgoingMangler;
 	}
 
 	/** Is this peer disabled? I.e. has the user explicitly disabled it? */
@@ -3862,11 +3791,8 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		return false;
 	}
 
-	/** Is this peer allowed local addresses? If false, we will never connect to this peer via
-	 * a local address even if it advertises them.
-	 */
-	public boolean allowLocalAddresses() {
-		return this.outgoingMangler.alwaysAllowLocalAddresses();
+	public boolean allowLocalAddress() {
+		return false;
 	}
 
 	/** Is this peer set to ignore source address? If so, we will always reply to the peer's official
@@ -3879,11 +3805,15 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	/**
 	 * Create a DarknetPeerNode or an OpennetPeerNode as appropriate
 	 */
-	public static PeerNode create(SimpleFieldSet fs, Node node2, NodeCrypto crypto, OpennetManager opennet, PeerManager manager, OutgoingPacketMangler mangler) throws FSParseException, PeerParseException, ReferenceSignatureVerificationException {
+	public static PeerNode create(SimpleFieldSet fs, Node node2, NodeCrypto crypto, OpennetManager opennet, PeerManager manager) throws FSParseException, PeerParseException, ReferenceSignatureVerificationException {
 		if(crypto.isOpennet)
-			return new OpennetPeerNode(fs, node2, crypto, opennet, manager, true, mangler);
+			return new OpennetPeerNode(fs, node2, crypto, opennet, manager, true);
 		else
-			return new DarknetPeerNode(fs, node2, crypto, manager, true, mangler, null, null);
+			return new DarknetPeerNode(fs, node2, crypto, manager, true, null, null);
+	}
+
+	public byte[] getIdentity() {
+		return identity;
 	}
 	
 	public byte[] getPubKeyHash() {
@@ -3962,6 +3892,10 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 
 	public synchronized boolean isDisconnecting() {
 		return disconnecting;
+	}
+	
+	public synchronized void setDisconnecting(boolean disconnecting) {
+		this.disconnecting = disconnecting;
 	}
 
 	protected byte[] getJFKBuffer() {
@@ -4049,62 +3983,11 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	 * Alternates between valid values.
 	 * (FIXME!)
 	 */
-	public Peer getHandshakeIP() {
-		Peer[] localHandshakeIPs;
-		if(!shouldSendHandshake()) {
-			if(logMINOR) Logger.minor(this, "Not sending handshake to "+getPeer()+" because pn.shouldSendHandshake() returned false");
-			return null;
-		}
-		long firstTime = System.currentTimeMillis();
-		localHandshakeIPs = getHandshakeIPs();
-		long secondTime = System.currentTimeMillis();
-		if((secondTime - firstTime) > 1000)
-			Logger.error(this, "getHandshakeIPs() took more than a second to execute ("+(secondTime - firstTime)+") working on "+userToString());
-		if(localHandshakeIPs.length == 0) {
-			long thirdTime = System.currentTimeMillis();
-			if((thirdTime - secondTime) > 1000)
-				Logger.error(this, "couldNotSendHandshake() (after getHandshakeIPs()) took more than a second to execute ("+(thirdTime - secondTime)+") working on "+userToString());
-			return null;
-		}
-		long loopTime1 = System.currentTimeMillis();
-		List<Peer> validIPs = new ArrayList<Peer>(localHandshakeIPs.length);
-		boolean allowLocalAddresses = allowLocalAddresses();
-		for(Peer peer: localHandshakeIPs) {
-			FreenetInetAddress addr = peer.getFreenetAddress();
-			if(peer.getAddress(false) == null) {
-				if(logMINOR) Logger.minor(this, "Not sending handshake to "+peer+" for "+getPeer()+" because the DNS lookup failed or it's a currently unsupported IPv6 address");
-				continue;
-			}
-			if(!peer.isRealInternetAddress(false, false, allowLocalAddresses)) {
-				if(logMINOR) Logger.minor(this, "Not sending handshake to "+peer+" for "+getPeer()+" because it's not a real Internet address and metadata.allowLocalAddresses is not true");
-				continue;
-			}
-			if(!isConnected()) {
-				// If we are connected, we are rekeying.
-				// We have separate code to boot out connections.
-				if(!outgoingMangler.allowConnection(this, addr)) {
-					if(logMINOR)
-						Logger.minor(this, "Not sending handshake packet to "+peer+" for "+this);
-					continue;
-				}
-			}
-			validIPs.add(peer);
-		}
-		Peer ret;
-		if(validIPs.isEmpty()) {
-			ret = null;
-		} else if(validIPs.size() == 1) {
-			ret = validIPs.get(0);
-		} else {
-			// Don't need to synchronize for this value as we're only called from one thread anyway.
-			handshakeIPAlternator %= validIPs.size();
-			ret = validIPs.get(handshakeIPAlternator);
-			handshakeIPAlternator++;
-		}
-		long loopTime2 = System.currentTimeMillis();
-		if((loopTime2 - loopTime1) > 1000)
-			Logger.normal(this, "loopTime2 is more than a second after loopTime1 ("+(loopTime2 - loopTime1)+") working on "+userToString());
-		return ret;
+	public PluginAddress getHandshakeAddress(TransportPlugin transportPlugin) {
+		PeerTransport peerTransport = getPeerTransport(transportPlugin);
+		if(peerTransport != null)
+			return peerTransport.getHandshakeAddress();
+		return null;
 	}
 
 	private int handshakeIPAlternator;
@@ -4188,15 +4071,27 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 
 	@Override
 	public boolean shouldThrottle() {
-		return shouldThrottle(getPeer(), node);
+		for(String transportName : peerPacketTransportMap.keySet()) {
+			boolean temp = shouldThrottle(peerPacketTransportMap.get(transportName).detectedTransportAddress, node);
+			//If one of the transports says it is not necessary to throttle then we can assume throttling is not necessary.
+			if(!temp)
+				return false;
+		}
+		return true;
 	}
-
-	public static boolean shouldThrottle(Peer peer, Node node) {
+	
+	public static boolean shouldThrottle(PluginAddress address, Node node) {
 		if(node.throttleLocalData) return true;
-		if(peer == null) return true; // presumably
-		InetAddress addr = peer.getAddress(false);
-		if(addr == null) return true; // presumably
-		return IPUtil.isValidAddress(addr, false);
+		if(address == null) return true; // presumably
+		InetAddress addr;
+		try {
+			addr = address.getFreenetAddress().getAddress();
+			if(addr == null) return true; // presumably
+			return IPUtil.isValidAddress(addr, false);
+		}catch(UnsupportedIPAddressOperationException e) {
+			return false; //Non ip based plugin address. Since it is not null we can safely assume it is fine.
+		}
+		
 	}
 
 	static final long MAX_RTO = SECONDS.toMillis(60);
@@ -5438,10 +5333,12 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		return messageQueue;
 	}
 
-	public boolean handleReceivedPacket(byte[] buf, int offset, int length, long now, Peer replyTo) {
+	public boolean handleReceivedPacket(byte[] buf, int offset, int length,
+			long now, PluginAddress replyTo, PacketTransportPlugin transportPlugin) {
+		PeerPacketTransport peerTransport = getPeerTransport(transportPlugin);
 		PacketFormat pf;
 		synchronized(this) {
-			pf = packetFormat;
+			pf = peerTransport.packetFormat;
 			if(pf == null) return false;
 		}
 		return pf.handleReceivedPacket(buf, offset, length, now, replyTo);
@@ -5500,10 +5397,26 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	public void sendEncryptedPacket(byte[] data) throws LocalAddressException {
 		crypto.socket.sendPacket(data, getPeer(), allowLocalAddresses());
 	}
-	
+
 	@Override
+	public int getMaxPacketSize(PacketTransportPlugin transportPlugin) {
+		return transportPlugin.getMaxPacketSize();
+	}
+	
+	/**
+	 * We want to return the smallest of all the maximum packet sizes.
+	 * @return
+	 */
 	public int getMaxPacketSize() {
-		return crypto.socket.getMaxPacketSize();
+		int maxPacketSize = Integer.MAX_VALUE;
+		for(String transportName : peerPacketTransportMap.keySet()) {
+			PacketTransportPlugin transportPlugin = peerPacketTransportMap.get(transportName).transportPlugin;
+			int temp = transportPlugin.getMaxPacketSize();
+			if(temp < maxPacketSize)
+				maxPacketSize = temp;
+			
+		}
+		return maxPacketSize;
 	}
 	
 	@Override
@@ -5532,33 +5445,41 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		return paddingGen;
 	}
 
-	public synchronized boolean matchesPeerAndPort(Peer peer) {
-		if(detectedPeer != null && detectedPeer.laxEquals(peer)) return true;
-		if(nominalPeer != null) { // FIXME condition necessary???
-			for(Peer p : nominalPeer) {
-				if(p != null && p.laxEquals(peer)) return true;
-			}
-		}
-		return false;
-	}
-
-	/** Does this PeerNode match the given IP address? 
+	/** 
+	 * Does this PeerNode match the given IP address? 
+	 * We assume each IP based transport to be on a different IP.
 	 * @param strict If true, only match if the IP is actually in use. If false,
-	 * also match from nominal IP addresses and domain names etc. */
-	public synchronized boolean matchesIP(FreenetInetAddress addr, boolean strict) {
-		if(detectedPeer != null) {
-			FreenetInetAddress a = detectedPeer.getFreenetAddress();
-			if(a != null) {
-				if(strict ? a.equals(addr) : a.laxEquals(addr))
-					return true;
+	 * also match from nominal IP addresses and domain names etc. 
+	 */
+	public synchronized boolean matchesIP(FreenetInetAddress addr, boolean strict, TransportPlugin transportPlugin) {
+		PeerTransport peerTransport = getPeerTransport(transportPlugin);
+		PluginAddress detectedTransportAddress = null;
+		ArrayList<PluginAddress> nominalTransportAddress = null;
+		if(peerTransport != null) {
+			detectedTransportAddress = peerTransport.detectedTransportAddress;
+			nominalTransportAddress = peerTransport.nominalTransportAddress;
+		}
+		if(detectedTransportAddress != null) {
+			try {
+				FreenetInetAddress a = detectedTransportAddress.getFreenetAddress();
+				if(a != null) {
+					if(strict ? a.equals(addr) : a.laxEquals(addr))
+						return true;
+				}
+			}catch(UnsupportedIPAddressOperationException e) {
+				return false; //Not IP based
 			}
 		}
-		if((!strict) && nominalPeer != null) {
-			for(Peer p : nominalPeer) {
+		if((!strict) && nominalTransportAddress != null) {
+			for(PluginAddress p : nominalTransportAddress) {
 				if(p == null) continue;
-				FreenetInetAddress a = p.getFreenetAddress();
-				if(a == null) continue;
-				if(a.laxEquals(addr)) return true;
+				try {
+					FreenetInetAddress a = p.getFreenetAddress();
+					if(a == null) continue;
+					if(a.laxEquals(addr)) return true;
+				}catch(UnsupportedIPAddressOperationException e) {
+					return false; //Not IP based
+				}
 			}
 		}
 		return false;
@@ -5756,14 +5677,13 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	
 	static final long THROTTLE_REKEY = 1000;
 	
-	public synchronized boolean throttleRekey() {
-		long now = System.currentTimeMillis();
-		if(now - lastIncomingRekey < THROTTLE_REKEY) {
-			Logger.error(this, "Two rekeys initiated by other side within "+THROTTLE_REKEY+"ms");
-			return true;
+	public synchronized boolean throttleRekey(TransportPlugin transportPlugin) {
+		PeerTransport peerTransport = getPeerTransport(transportPlugin);
+		if(peerTransport != null) {
+			return peerTransport.throttleRekey();
 		}
-		lastIncomingRekey = now;
-		return false;
+		Logger.error(this, "Transport was not found in both places. Not possible");
+		return false; //Unlikely case
 	}
 
 	public boolean fullPacketQueued() {
@@ -5974,4 +5894,243 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 		// FIXME when negType 9 is mandatory, make peerECDSAPubKey final and remove this getter.
 		return peerECDSAPubKeyHash;
 	}
+	/**
+	 * Method called from setTransportAddress or from NodeCrypto (handleNewTransport method).
+	 * Checks if we have any address i.e if our peer has loaded the same transport, and then decides to use it.
+	 */
+	public synchronized void handleNewPeerTransport(PacketTransportBundle packetTransportBundle) {
+		HashSet<String> physical = peerEnabledTransports.get(packetTransportBundle.transportName);
+		if(physical == null)
+			return;	//Don't load the transport if the peer does not use it.
+		if(physical.size() == 0)
+			return;
+		PeerPacketTransport peerPacketTransport = new PeerPacketTransport(packetTransportBundle, this);
+		// Don't use purge unnecessarily. In this case since it a new transport we don't need to do it.
+		peerPacketTransport.setTransportAddress(physical, false, false);
+		synchronized(packetTransportMapLock) {
+			peerPacketTransportMap.put(peerPacketTransport.transportName, peerPacketTransport);
+		}
+	}
+	
+	/**
+	 * Method called from createPeerStreamTransportMap or from NodeCrypto (handleNewTransport method).
+	 * Checks if we have any address i.e if our peer has loaded the same transport, and then decides to use it.
+	 */
+	public synchronized void handleNewPeerTransport(StreamTransportBundle streamTransportBundle) {
+		HashSet<String> physical = peerEnabledTransports.get(streamTransportBundle.transportName);
+		if(physical == null)
+			return;	//Don't load the transport if the peer does not use it.
+		if(physical.size() == 0)
+			return;
+		PeerStreamTransport peerStreamTransport = new PeerStreamTransport(streamTransportBundle, this);
+		// Don't use purge unnecessarily. In this case since it a new transport we don't need to do it.
+		peerStreamTransport.setTransportAddress(physical, false, false);
+		synchronized(streamTransportMapLock) {
+			peerStreamTransportMap.put(peerStreamTransport.transportName, peerStreamTransport);
+		}
+	}
+	
+	public synchronized void disableTransport(String transportName) {
+		if(peerPacketTransportMap.containsKey(transportName)) {
+			synchronized(packetTransportMapLock) {
+				disconnectTransport(true, peerPacketTransportMap.get(transportName));
+				peerPacketTransportMap.remove(transportName);
+			}
+		}
+		else if(peerStreamTransportMap.containsKey(transportName)) {
+			synchronized(streamTransportMapLock) {
+				disconnectTransport(true, peerStreamTransportMap.get(transportName));
+				peerStreamTransportMap.remove(transportName);
+			}
+		}
+		//Do other stuff. Inform of noderef change.
+	}
+	
+	/**
+	 * This method should be called when a particular transport has disconnected. 
+	 * @param transportPlugin The transport that we need to handshake with.
+	 * @param notRegistered
+	 * @throws TransportPluginException Thrown if this PeerNode does not use the transport
+	 */
+	public void sendTransportHandshake(TransportPlugin transportPlugin, boolean notRegistered){
+		PeerTransport peerTransport = getPeerTransport(transportPlugin);
+		if(peerTransport != null)
+			peerTransport.outgoingMangler.sendHandshake(this, notRegistered);
+	}
+	
+	/**
+	 * We can use this when we have a noderef to process or the peer noderef has changed.
+	 * It ll check if our peer loaded any new transport 
+	 * and try to handshake with that as well (if we ourselves have that transport that is).
+	 * Also if we call this for metadata it does not directly setDetectedTransportAddress.
+	 * This should be done explicity.
+	 * Refer to previous Peer address based version of PeerNode for what used to happen.
+	 * @param fs
+	 * @param setDetected If true, it is assumed that it is the metadata information and we can directly set
+	 * detectedTransportAddress.
+	 * @param purgeAddresses If true it will get rid of all previous addresses.
+	 * Use it only if a new noderef has been obtained
+	 */
+	public synchronized void setTransportAddress(SimpleFieldSet fs, boolean setDetected, boolean purgeAddresses) {
+		Iterator<String> it = fs.keyIterator();
+		while(it.hasNext()) {
+			PacketTransportBundle packetBundle;
+			StreamTransportBundle streamBundle;
+			String transportName = it.next();
+			String[] addresses = fs.getAll(transportName);
+			HashSet<String> arrayAddress = recordAddress(transportName, addresses);
+			
+			// Condition 1: Inform already loaded transports of the new addresses.
+			if(peerPacketTransportMap.containsKey(transportName))
+				peerPacketTransportMap.get(transportName).setTransportAddress(arrayAddress, setDetected, purgeAddresses);
+			else if(peerStreamTransportMap.containsKey(transportName))
+				peerStreamTransportMap.get(transportName).setTransportAddress(arrayAddress, setDetected, purgeAddresses);
+			
+			//Condition 2: If we find that our peer has a new transport that we have, then get it
+			
+			else if((packetBundle = crypto.getPacketTransportBundleMap(transportName)) != null)
+				handleNewPeerTransport(packetBundle);
+			else if((streamBundle = crypto.getStreamTransportBundleMap(transportName)) != null)
+				handleNewPeerTransport(streamBundle);
+			
+			//Condition 3: Inform the user that we don't have this transport.
+			//TODO add user alerts
+			
+		}
+	}
+	
+	public synchronized HashMap<String, PeerPacketTransport> getPeerPacketTransportMap(){
+		return peerPacketTransportMap;
+	}
+	
+	public synchronized HashMap<String, PeerStreamTransport> getPeerStreamTransportMap(){
+		return peerStreamTransportMap;
+	}
+	
+	public boolean containsTransport(String transportName){
+		if(peerPacketTransportMap.containsKey(transportName))
+			return true;
+		else if(peerStreamTransportMap.containsKey(transportName))
+			return true;
+		
+		return false;
+	}
+	
+	public boolean matchesPluginAddress(PluginAddress address, TransportPlugin transportPlugin) {
+		PeerTransport peerTransport = getPeerTransport(transportPlugin);
+		if(peerTransport != null) {
+			if(peerTransport.detectedTransportAddress.laxEquals(address))
+				return true;
+		}
+		return false;
+	}
+	
+	/**
+	 * Check if we are already connected to a PeerNode having the same physical address.
+	 * Check if we want to connect to this PeerNode
+	 * @return True if this PeerNode is unique and we can connect to it.
+	 */
+	public boolean checkPeerNodeUnique() {
+		for(String transportName : peerPacketTransportMap.keySet()) {
+			if(!checkPeerNodeUnique(peerPacketTransportMap.get(transportName)))
+				return false;
+		}
+		for(String transportName : peerStreamTransportMap.keySet()) {
+			if(!checkPeerNodeUnique(peerStreamTransportMap.get(transportName)))
+				return false;
+		}
+		return true;
+	}
+	
+	public boolean checkPeerNodeUnique(PeerTransport peerTransport) {
+		boolean okay = false;
+		boolean any = false;
+		PluginAddress[] handshakeTransportAddress = peerTransport.handshakeTransportAddresses;
+		if(handshakeTransportAddress != null) {
+			for(PluginAddress address : handshakeTransportAddress) {
+				if(address == null) continue;
+				try {	
+					FreenetInetAddress addr = address.getFreenetAddress();
+					if(addr == null) continue;
+					InetAddress a = addr.getAddress(false);
+					if(a == null) continue;
+					if(a.isAnyLocalAddress() || a.isSiteLocalAddress()) continue;
+					any = true;
+					if(crypto.allowConnection(this, addr, peerTransport.transportPlugin))
+						okay = true;
+				}catch(UnsupportedIPAddressOperationException e) {
+					//Non IP based addresses are assumed to be unique for now
+				}
+			}
+		} else {
+			Logger.error(this, "Peer does not have any IP addresses???");
+		}
+		if(any && !okay) {
+			Logger.normal(this, "Rejecting peer as we are already connected to a peer with the same IP address");
+			return false;
+		}
+		return true;
+	}
+	
+	public PeerTransport getPeerTransport(TransportPlugin transportPlugin) {
+		String transportName = transportPlugin.transportName;
+		PeerTransport peerTransport;
+		synchronized(packetTransportMapLock) {
+			peerTransport = peerPacketTransportMap.get(transportName);
+			if(peerTransport != null)
+				return peerTransport;
+		}
+		synchronized(streamTransportMapLock) {	
+			peerTransport = peerStreamTransportMap.get(transportName);
+			if(peerTransport != null)
+				return peerTransport;
+		}
+		return null;
+	}
+	
+	public PeerPacketTransport getPeerTransport(PacketTransportPlugin transportPlugin) {
+		synchronized(packetTransportMapLock) {
+			return peerPacketTransportMap.get(transportPlugin.transportName);
+		}
+	}
+	
+	public PeerStreamTransport getPeerTransport(StreamTransportPlugin transportPlugin) {
+		synchronized(streamTransportMapLock) {	
+			return peerStreamTransportMap.get(transportPlugin.transportName);
+		}
+	}
+	
+	@Override
+	public PeerMessageTracker getPeerMessageTracker() {
+		return pmt;
+	}
+	
+	/**
+	 * Record the addresses in peerEnabledTransports which is referred later on.
+	 * @param transportName
+	 * @param address
+	 * @return The address that exists after the operation for that particular transport 
+	 */
+	private HashSet<String> recordAddress(String transportName, HashSet<String> address) {
+		HashSet<String> temp = peerEnabledTransports.get(transportName);
+		if(temp == null)
+			temp = new HashSet<String> ();
+		temp.addAll(address);
+		peerEnabledTransports.put(transportName, temp);
+		return temp;
+	}
+	
+	/**
+	 * Record the addresses in peerEnabledTransports which is referred later on.
+	 * @param transportName
+	 * @param address
+	 * @return The address that exists after the operation for that particular transport
+	 */
+	private HashSet<String> recordAddress(String transportName, String[] address) {
+		HashSet<String> temp = new HashSet<String> ();
+		for(String addr : address)
+			temp.add(addr);
+		return recordAddress(transportName, temp);
+	}
+	
 }

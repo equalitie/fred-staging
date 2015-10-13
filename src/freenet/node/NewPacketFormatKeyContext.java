@@ -77,7 +77,7 @@ public class NewPacketFormatKeyContext {
 		}
 	}
 
-	int allocateSequenceNumber(BasePeerNode pn) {
+	int allocateSequenceNumber(PeerTransport peerTransport) {
 		synchronized(sequenceNumberLock) {
 			if(firstSeqNumUsed == -1) {
 				firstSeqNumUsed = nextSeqNum;
@@ -85,14 +85,14 @@ public class NewPacketFormatKeyContext {
 			} else {
 				if(nextSeqNum == firstSeqNumUsed) {
 					Logger.error(this, "Blocked because we haven't rekeyed yet");
-					pn.startRekeying();
+					peerTransport.startRekeying();
 					return -1;
 				}
 				
 				if(firstSeqNumUsed > nextSeqNum) {
-					if(firstSeqNumUsed - nextSeqNum < REKEY_THRESHOLD) pn.startRekeying();
+					if(firstSeqNumUsed - nextSeqNum < REKEY_THRESHOLD) peerTransport.startRekeying();
 				} else {
-					if((NewPacketFormat.NUM_SEQNUMS - nextSeqNum) + firstSeqNumUsed < REKEY_THRESHOLD) pn.startRekeying();
+					if((NewPacketFormat.NUM_SEQNUMS - nextSeqNum) + firstSeqNumUsed < REKEY_THRESHOLD) peerTransport.startRekeying();
 				}
 			}
 			int seqNum = nextSeqNum++;
@@ -103,7 +103,7 @@ public class NewPacketFormatKeyContext {
 		}
 	}
 
-	/** One of our outgoing packets has been acknowledged. */
+	/** One of our outgoing packets has been acknowledged.
 	public void ack(int ack, BasePeerNode pn, SessionKey key) {
 		long rtt;
 		int maxSize;
@@ -193,7 +193,7 @@ public class NewPacketFormatKeyContext {
 				int ack = entry.getKey();
 				// All acks must be sent within 200ms.
 				if(logDEBUG) Logger.debug(this, "Trying to ack "+ack);
-				if(!packet.addAck(ack, maxPacketSize)) {
+				if(!packet.addAck(ack)) {
 					if(logDEBUG) Logger.debug(this, "Can't add ack "+ack);
 					break;
 				}
@@ -233,7 +233,7 @@ public class NewPacketFormatKeyContext {
 			}
 		}
 	}
-	
+
 	public long timeCheckForLostPackets(double averageRTT) {
 		long timeCheck = Long.MAX_VALUE;
 		// Because MIN_RTT_FOR_RETRANSMIT > MAX_ACK_DELAY, and because averageRTT() includes the

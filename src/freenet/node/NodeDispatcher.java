@@ -23,6 +23,8 @@ import freenet.keys.NodeCHK;
 import freenet.keys.NodeSSK;
 import freenet.node.NodeStats.PeerLoadStats;
 import freenet.node.NodeStats.RejectReason;
+import freenet.pluginmanager.MalformedPluginAddressException;
+import freenet.pluginmanager.TransportPluginException;
 import freenet.node.probe.Probe;
 import freenet.store.BlockMetadata;
 import freenet.support.Fields;
@@ -142,6 +144,18 @@ public class NodeDispatcher implements Dispatcher, Runnable {
 		} else if(spec == DMT.FNPDetectedIPAddress) {
 			Peer p = (Peer) m.getObject(DMT.EXTERNAL_ADDRESS);
 			source.setRemoteDetectedPeer(p);
+			node.ipDetector.redetectAddress();
+			return true;
+		} else if(spec == DMT.FNPDetectedTransportAddress){
+			byte[] add = (byte[]) m.getObject(DMT.EXTERNAL_ADDRESS);
+			String transportName = (String) m.getObject(DMT.TRANSPORT_NAME);
+			try {
+				source.setRemoteDetectedTransportAddress(add, transportName);
+			} catch (TransportPluginException e) {
+				Logger.error(this, "Unknown transport plugin", e);
+			} catch (MalformedPluginAddressException e) {
+				Logger.error(this, "Address is broken", e);
+			}
 			node.ipDetector.redetectAddress();
 			return true;
 		} else if(spec == DMT.FNPTime) {
@@ -405,7 +419,7 @@ public class NodeDispatcher implements Dispatcher, Runnable {
 	}
 	
 	private void finishDisconnect(final Message m, final PeerNode source) {
-		source.disconnected(true, true);
+		source.disconnectPeer(true, true);
 		// If true, remove from active routing table, likely to be down for a while.
 		// Otherwise just dump all current connection state and keep trying to connect.
 		boolean remove = m.getBoolean(DMT.REMOVE);

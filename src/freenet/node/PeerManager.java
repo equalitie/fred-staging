@@ -36,6 +36,9 @@ import freenet.keys.Key;
 import freenet.node.DarknetPeerNode.FRIEND_TRUST;
 import freenet.node.DarknetPeerNode.FRIEND_VISIBILITY;
 import freenet.node.useralerts.PeerManagerUserAlert;
+import freenet.pluginmanager.PluginAddress;
+import freenet.pluginmanager.TransportPlugin;
+import freenet.pluginmanager.UnsupportedIPAddressOperationException;
 import freenet.support.ByteArrayWrapper;
 import freenet.support.Logger;
 import freenet.support.ShortBuffer;
@@ -198,13 +201,13 @@ public class PeerManager {
 				else
 					darkFilename = filename;
 		}
-		OutgoingPacketMangler mangler = crypto.packetMangler;
+
 		int maxBackups = isOpennet ? BACKUPS_OPENNET : BACKUPS_DARKNET;
 		for(int i=0;i<=maxBackups;i++) {
 			File peersFile = this.getBackupFilename(filename, i);
 			// Try to read the node list from disk
 			if(peersFile.exists())
-				if(readPeers(peersFile, mangler, crypto, opennet, oldOpennetPeers)) {
+				if(readPeers(peersFile, crypto, opennet, oldOpennetPeers)) {
 					String msg;
 					if(oldOpennetPeers)
 						msg = "Read " + opennet.countOldOpennetPeers() + " old-opennet-peers from " + peersFile;
@@ -222,7 +225,7 @@ public class PeerManager {
 		// The other cases are less important.
 	}
 
-	private boolean readPeers(File peersFile, OutgoingPacketMangler mangler, NodeCrypto crypto, OpennetManager opennet, boolean oldOpennetPeers) {
+	private boolean readPeers(File peersFile, NodeCrypto crypto, OpennetManager opennet, boolean oldOpennetPeers) {
 		boolean someBroken = false;
 		boolean gotSome = false;
 		FileInputStream fis;
@@ -244,8 +247,9 @@ public class PeerManager {
 				// Read a single NodePeer
 				SimpleFieldSet fs;
 				fs = new SimpleFieldSet(br, false, true);
+				PeerNode pn;
 				try {
-					PeerNode pn = PeerNode.create(fs, node, crypto, opennet, this, mangler);
+					pn = PeerNode.create(fs, node, crypto, opennet, this);
 					if(oldOpennetPeers) {
 					    if(!(pn instanceof OpennetPeerNode))
 					        Logger.error(this, "Darknet node in old opennet peers?!: "+pn);
@@ -534,47 +538,85 @@ public class PeerManager {
 //    }
 //
 	/**
-	 * Find the node with the given Peer address. Used by FNPPacketMangler to try to 
-	 * quickly identify a peer by the address of the packet. Includes 
-	 * non-isRealConnection()'s since they can also be connected.
+	 * Find the node with the given PluginAddress. Used by FNPPacketMangler to try to 
+	 * quickly identify a peer by the address of the packet.
 	 */
-	public PeerNode getByPeer(Peer peer) {
-		PeerNode[] peerList = myPeers();
-		for(PeerNode pn : peerList) {
-			if(pn.isDisabled()) continue;
-			if(pn.matchesPeerAndPort(peer))
-				return pn;
+	public PeerNode getByAddress(PluginAddress peerAddress, TransportPlugin transportPlugin) {
+		PeerNode[] peerList = myPeers;
+		for(PeerNode peer : peerList) {
+			if(peer.isDisabled()) continue;
+			if( peer.matchesPluginAddress(peerAddress, transportPlugin) ) 
+				return peer;
 		}
-		// Try a match by IP address if we can't match exactly by IP:port.
-		FreenetInetAddress addr = peer.getFreenetAddress();
-		for(PeerNode pn : peerList) {
-			if(pn.isDisabled()) continue;
-			if(pn.matchesIP(addr, false))
-				return pn;
+		// Try a match by IP address if we can't match exactly by IP:port. Only if IP based address
+		try {
+			FreenetInetAddress addr = peerAddress.getFreenetAddress();
+			for(PeerNode peer : peerList) {
+				if(peer.isDisabled()) continue;
+				if(peer.matchesIP(addr, false, transportPlugin))
+					return peer;
+			}
+			return null;
+		}catch(UnsupportedIPAddressOperationException e) {
+			//Can't do anything
 		}
 		return null;
 	}
 	
 	/**
-	 * Find the node with the given Peer address, or IP address. Checks the outgoing
+	 * Find the node with the given PluginAddress address. Checks the outgoing
 	 * packet mangler as well.
 	 * @param peer
 	 * @param mangler
 	 * @return
 	 */
-	public PeerNode getByPeer(Peer peer, FNPPacketMangler mangler) {
-		PeerNode[] peerList = myPeers();
-		for(PeerNode pn : peerList) {
-			if(pn.isDisabled()) continue;
-			if(pn.matchesPeerAndPort(peer) && pn.getOutgoingMangler() == mangler)
-				return pn;
+	public PeerNode getByAddress(PluginAddress peerAddress, OutgoingPacketMangler mangler) {
+		PeerNode[] peerList = myPeers;
+		for(PeerNode peer : peerList) {
+			if(peer.isDisabled()) continue;
+			if( (peer.matchesPluginAddress(peerAddress, mangler.getTransport())) 
+				&& (peer.getOutgoingMangler(mangler.getTransport()) == mangler) )
+				return peer;
 		}
-		// Try a match by IP address if we can't match exactly by IP:port.
-		FreenetInetAddress addr = peer.getFreenetAddress();
-		for(PeerNode pn : peerList) {
-			if(pn.isDisabled()) continue;
-			if(pn.matchesIP(addr, false) && pn.getOutgoingMangler() == mangler)
-				return pn;
+		// Try a match by IP address if we can't match exactly by IP:port. Only if IP based address
+		try {
+			FreenetInetAddress addr = peerAddress.getFreenetAddress();
+			for(PeerNode peer : peerList) {
+				if(peer.isDisabled()) continue;
+				if(peer.matchesIP(addr, false, mangler.getTransport()) && peer.getOutgoingMangler(mangler.getTransport()) == mangler)
+					return peer;
+			}
+		}catch(UnsupportedIPAddressOperationException e) {
+			//Can't do anything
+		}
+		return null;
+	}
+	
+	/**
+	 * Find the node with the given PluginAddress address. Checks the outgoing
+	 * packet mangler as well.
+	 * @param peer
+	 * @param mangler
+	 * @return
+	 */
+	public PeerNode getByAddress(PluginAddress peerAddress, OutgoingStreamMangler mangler) {
+		PeerNode[] peerList = myPeers;
+		for(PeerNode peer : peerList) {
+			if(peer.isDisabled()) continue;
+			if( (peer.matchesPluginAddress(peerAddress, mangler.getTransport())) 
+				&& (peer.getOutgoingMangler(mangler.getTransport()) == mangler) )
+				return peer;
+		}
+		// Try a match by IP address if we can't match exactly by IP:port. Only if IP based address
+		try {
+			FreenetInetAddress addr = peerAddress.getFreenetAddress();
+			for(PeerNode peer : peerList) {
+				if(peer.isDisabled()) continue;
+				if(peer.matchesIP(addr, false, mangler.getTransport()) && peer.getOutgoingMangler(mangler.getTransport()) == mangler)
+					return peer;
+			}
+		}catch(UnsupportedIPAddressOperationException e) {
+			//Can't do anything
 		}
 		return null;
 	}
@@ -582,7 +624,7 @@ public class PeerManager {
 	/**
 	 * Find nodes with a given IP address.
 	 */
-	public ArrayList<PeerNode> getAllConnectedByAddress(FreenetInetAddress a, boolean strict) {
+	public ArrayList<PeerNode> getAllConnectedByIPAddress(FreenetInetAddress a, boolean strict, TransportPlugin transportPlugin) {
 		ArrayList<PeerNode> found = null;
 		
 		PeerNode[] peerList = myPeers();
@@ -590,7 +632,26 @@ public class PeerManager {
 		for(PeerNode pn : peerList) {
 			if(!pn.isConnected()) continue;
 			if(!pn.isRoutable()) continue;
-			if(pn.matchesIP(a, strict)) {
+			if(pn.matchesIP(a, strict, transportPlugin)) {
+				if(found == null) found = new ArrayList<PeerNode>();
+				found.add(pn);
+			}
+		}
+		return found;
+	}
+	
+	/**
+	 * Find nodes with a given PluginAddress.
+	 */
+	public ArrayList<PeerNode> getAllConnectedByAddress(PluginAddress a, boolean strict, TransportPlugin transportPlugin) {
+		ArrayList<PeerNode> found = null;
+		
+		PeerNode[] peerList = myPeers;
+		// Try a match by IP address if we can't match exactly by IP:port.
+		for(PeerNode pn : peerList) {
+			if(!pn.isConnected()) continue;
+			if(!pn.isRoutable()) continue;
+			if(pn.matchesPluginAddress(a, transportPlugin)) {
 				if(found == null) found = new ArrayList<PeerNode>();
 				found.add(pn);
 			}
@@ -601,7 +662,7 @@ public class PeerManager {
 	/**
 	 * Connect to a node provided the fieldset representing it.
 	 */
-	public void connect(SimpleFieldSet noderef, OutgoingPacketMangler mangler, FRIEND_TRUST trust, FRIEND_VISIBILITY visibility) throws FSParseException, PeerParseException, ReferenceSignatureVerificationException {
+	public void connect(SimpleFieldSet noderef, FRIEND_TRUST trust, FRIEND_VISIBILITY visibility) throws FSParseException, PeerParseException, ReferenceSignatureVerificationException {
 		PeerNode pn = node.createNewDarknetNode(noderef, trust, visibility);
 		PeerNode[] peerList = myPeers();
 		for(PeerNode mp: peerList) {
@@ -697,7 +758,7 @@ public class PeerManager {
 									}
 								}
 							}
-							pn.disconnected(true, true);
+							pn.disconnectPeer(true, true);
 						}
 					}
 				}, timeout);
@@ -2010,7 +2071,7 @@ public class PeerManager {
 		return v.toArray(new PeerNode[v.size()]);
 	}
 
-	public boolean anyConnectedPeerHasAddress(FreenetInetAddress addr, PeerNode pn) {
+	public boolean anyConnectedPeerHasAddress(FreenetInetAddress addr, PeerNode pn, TransportPlugin transportPlugin) {
 		PeerNode[] peers = myPeers();
 		for(PeerNode p : peers) {
 			if(p == pn)
@@ -2027,8 +2088,14 @@ public class PeerManager {
 				// FIXME likewise, FOAFs should not boot darknet connections.
 				continue;
 			}
-			if(p.getPeer().getFreenetAddress().equals(addr))
-				return true;
+			PluginAddress address =  p.getTransportAddress(transportPlugin);
+			try {
+				if(address.getFreenetAddress().equals(addr))
+					return true;
+			}catch(UnsupportedIPAddressOperationException e) {
+				//Ignore for now, since we assume non ip based addresses won't have this situation
+			}
+			
 		}
 		return false;
 	}

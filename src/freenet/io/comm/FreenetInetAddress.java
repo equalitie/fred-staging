@@ -6,7 +6,6 @@ package freenet.io.comm;
 import java.io.DataInput;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 
@@ -118,6 +117,11 @@ public class FreenetInetAddress {
         if(checkHostnameOrIPSyntax && null != hostname) {
         	if(!HostnameUtil.isValidHostname(hostname, true)) throw new HostnameSyntaxException();
 		}
+	}
+
+	public FreenetInetAddress(InetAddress addr, String hostName) {
+		this._address = addr;
+		this.hostname = hostName;
 	}
 
 	/**
@@ -444,6 +448,10 @@ public class FreenetInetAddress {
 
 	public boolean hasHostnameNoIP() {
 		return hostname != null && hostname.length() > 0 && _address == null;
+	}
+
+	public String getHostName() {
+		return hostname;
 	}
 
 	public boolean isIPv6(boolean defaultValue) {

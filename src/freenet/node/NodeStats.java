@@ -1302,7 +1302,8 @@ public class NodeStats implements Persistable, BlockTimeCallback {
 			Logger.minor(this, "Expected received bytes: "+expectedReceived);
 		if(!requestInputThrottle.instantGrab(expectedReceived)) {
 			requestOutputThrottle.recycle(expectedSent);
-			rejected("Insufficient input bandwidth", isLocal, isInsert, isSSK, isOfferReply, realTimeFlag);
+			pInstantRejectIncoming.report(1.0);
+			rejected("Insufficient input bandwidth", isLocal, realTimeFlag);
 			return new RejectReason("Insufficient input bandwidth", false);
 			// FIXME slowDown?
 		}

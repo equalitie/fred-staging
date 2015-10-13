@@ -3,8 +3,9 @@ package freenet.node;
 import java.util.Random;
 
 import freenet.io.comm.Message;
-import freenet.io.comm.Peer.LocalAddressException;
 import freenet.io.comm.PeerContext;
+import freenet.pluginmanager.PacketTransportPlugin;
+import freenet.pluginmanager.TransportPlugin;
 
 /** Base interface for PeerNode, for purposes of the transport layer. Will be overridden
  * for unit tests to simplify testing. 
@@ -12,24 +13,11 @@ import freenet.io.comm.PeerContext;
  */
 public interface BasePeerNode extends PeerContext {
 
-	SessionKey getCurrentKeyTracker();
-
-	SessionKey getPreviousKeyTracker();
-
-	SessionKey getUnverifiedKeyTracker();
-
-	void receivedPacket(boolean dontLog, boolean dataPacket);
-
-	void verified(SessionKey s);
-
-	void startRekeying();
-
-	void maybeRekey();
 
 	void reportIncomingBytes(int length);
 
 	void reportOutgoingBytes(int length);
-	
+
 	DecodingMessageGroup startProcessingDecryptedMessages(int count);
 	
 	void reportPing(long rt);
@@ -38,15 +26,15 @@ public interface BasePeerNode extends PeerContext {
 
 	void wakeUpSender();
 
-	int getMaxPacketSize();
+	int getMaxPacketSize(PacketTransportPlugin transportPlugi);
 
 	PeerMessageQueue getMessageQueue();
+	
+	PeerMessageTracker getPeerMessageTracker();
 
 	boolean shouldPadDataPackets();
 
-	void sendEncryptedPacket(byte[] data) throws LocalAddressException;
-
-	void sentPacket();
+	void sentPacket(PacketTransportPlugin transportPlugin);
 
 	boolean shouldThrottle();
 
@@ -80,8 +68,8 @@ public interface BasePeerNode extends PeerContext {
 	/** Double the RTT when we resend a packet. */
 	void backoffOnResend();
 
-	/** Report when a packet was acked. */
-	void receivedAck(long currentTimeMillis);
+	/** Report when we received an ack. */
+	void receivedAck(long currentTimeMillis, TransportPlugin transportPlugin);
 
 	/** Report whether the node is capable of using cumacks. For backward compatibility issues */
 	boolean isUseCumulativeAcksSet();

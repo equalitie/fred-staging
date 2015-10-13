@@ -7,7 +7,6 @@ import java.lang.ref.WeakReference;
 
 import freenet.io.xfer.PacketThrottle;
 import freenet.node.MessageItem;
-import freenet.node.OutgoingPacketMangler;
 
 /**
  * @author amphibian
@@ -41,12 +40,6 @@ public interface PeerContext {
 	/** Get the PacketThrottle for the node's current address for the standard packet size (if the
 	 * address changes then we get a new throttle). */
 	public PacketThrottle getThrottle();
-
-	/** Get the SocketHandler which handles incoming packets from this node */
-	SocketHandler getSocketHandler();
-
-	/** Get the OutgoingPacketMangler which encrypts outgoing packets to this node */
-	OutgoingPacketMangler getOutgoingMangler();
 
 	/** Get a WeakReference to this context. Hopefully there is only one of these for the whole object; they are quite
 	 * expensive. */

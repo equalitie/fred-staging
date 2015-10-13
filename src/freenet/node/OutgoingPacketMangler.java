@@ -3,11 +3,9 @@
  * http://www.gnu.org/ for further details of the GPL. */
 package freenet.node;
 
-import freenet.io.AddressTracker.Status;
-import freenet.io.comm.FreenetInetAddress;
 import freenet.io.comm.Peer;
-import freenet.io.comm.PeerContext;
 import freenet.io.comm.SocketHandler;
+import freenet.pluginmanager.PacketTransportPlugin;
 
 /**
  * Low-level interface for sending packets.
@@ -16,58 +14,26 @@ import freenet.io.comm.SocketHandler;
  * @see freenet.io.comm.IncomingPacketFilter
  * @see freenet.node.FNPPacketMangler
  */
-public interface OutgoingPacketMangler {
+public interface OutgoingPacketMangler extends OutgoingMangler {
 
 	/**
-	 * Send a handshake, if possible, to the node.
-	 * @param pn
+	 * Size of the packet headers, in bytes, assuming only one message in this packet.
 	 */
-	public void sendHandshake(PeerNode pn, boolean notRegistered);
+	public int fullHeadersLengthOneMessage();
 
-	/**
-	 * Is a peer disconnected?
-	 */
-	public boolean isDisconnected(PeerContext context);
-	
-	/**
-	 * List of supported negotiation types in preference order (best last)
-	 */
-	public int[] supportedNegTypes(boolean forPublic);
-	
 	/**
 	 * The SocketHandler we are connected to.
 	 */
 	public SocketHandler getSocketHandler();
+	
+	/**
+	 * The PacketTransportPlugin using this mangler
+	 */
+	public PacketTransportPlugin getTransport();
 
 	/**
 	 * Get our addresses, as peers.
 	 */
 	public Peer[] getPrimaryIPAddress();
 
-	/**
-	 * Get our compressed noderef
-	 */
-	public byte[] getCompressedNoderef();
-	
-	/**
-	 * Always allow local addresses?
-	 */
-	public boolean alwaysAllowLocalAddresses();
-
-	/**
-	 * Port forwarding status.
-	 * @return A status code from AddressTracker. FIXME make this more generic when we need to.
-	 */
-	public Status getConnectivityStatus();
-
-	/**
-	 * Is there any reason not to allow this connection? E.g. limits on the number of nodes on
-	 * a specific IP address?
-	 */
-	public boolean allowConnection(PeerNode node, FreenetInetAddress addr);
-
-	/**
-	 * If the lower level code detects the port forwarding is broken, it will call this method.
-	 */
-	public void setPortForwardingBroken();
 }

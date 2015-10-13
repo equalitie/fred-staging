@@ -626,7 +626,6 @@ public class BlockTransmitter {
 					@Override
 					public void packetReceived(int packetNo) {
 						synchronized(_senderThread) {
-							if(logMINOR) Logger.minor(this, "Got packet "+packetNo+" for "+_uid+" to "+_destination);
 							if(_unsent.contains(packetNo)) {
 								Logger.error(this, "Already in unsent: "+packetNo+" for "+this+" unsent is "+_unsent, new Exception("error"));
 								return;

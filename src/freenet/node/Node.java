@@ -383,39 +383,58 @@ public class Node implements TimeSkewDetectorCallback {
 			if (!found)
 				throw new InvalidConfigValueException("Invalid store type");
 
-			synchronized(this) { // Serialise this part.
-				String suffix = getStoreSuffix();
-				if (val.equals("salt-hash")) {
-					byte[] key;
-                    try {
-                        synchronized(Node.this) {
-                            if(keys == null) throw new MasterKeysWrongPasswordException();
-                            key = keys.clientCacheMasterKey;
-                            clientCacheType = val;
-                        }
-                    } catch (MasterKeysWrongPasswordException e1) {
-                        setClientCacheAwaitingPassword();
-                        throw new InvalidConfigValueException("You must enter the password");
+				synchronized(this) { // Serialise this part.
+					String suffix = getStoreSuffix();
+					if (val.equals("salt-hash")) {
+						byte[] key;
+						synchronized(Node.this) {
+							key = cachedClientCacheKey;
+							cachedClientCacheKey = null;
+						}
+						if(key == null) {
+							MasterKeys keys = null;
+							try {
+								if(securityLevels.physicalThreatLevel == PHYSICAL_THREAT_LEVEL.MAXIMUM) {
+									key = new byte[32];
+									random.nextBytes(key);
+								} else {
+									keys = MasterKeys.read(masterKeysFile, random, "");
+									key = keys.clientCacheMasterKey;
+									keys.clearAllNotClientCacheKey();
+								}
+							} catch (MasterKeysWrongPasswordException e1) {
+								setClientCacheAwaitingPassword();
+								synchronized(Node.this) {
+									clientCacheType = val;
+								}
+								throw new InvalidConfigValueException("You must enter the password");
+							} catch (MasterKeysFileSizeException e1) {
+								throw new InvalidConfigValueException("Master keys file corrupted (too " + e1.sizeToString() + ")");
+							} catch (IOException e1) {
+								throw new InvalidConfigValueException("Master keys file cannot be accessed: "+e1);
+							}
+						}
+						try {
+							initSaltHashClientCacheFS(suffix, true, key);
+						} catch (NodeInitException e) {
+							Logger.error(this, "Unable to create new store", e);
+							System.err.println("Unable to create new store: "+e);
+							e.printStackTrace();
+							// FIXME l10n both on the NodeInitException and the wrapper message
+							throw new InvalidConfigValueException("Unable to create new store: "+e);
+						} finally {
+							MasterKeys.clear(key);
+						}
+					} else if(val.equals("ram")) {
+						initRAMClientCacheFS();
+					} else /*if(val.equals("none")) */{
+						initNoClientCacheFS();
 					}
-					try {
-						initSaltHashClientCacheFS(suffix, true, key);
-					} catch (NodeInitException e) {
-						Logger.error(this, "Unable to create new store", e);
-						System.err.println("Unable to create new store: "+e);
-						e.printStackTrace();
-						// FIXME l10n both on the NodeInitException and the wrapper message
-						throw new InvalidConfigValueException("Unable to create new store: "+e);
+
+					synchronized(Node.this) {
+						clientCacheType = val;
 					}
-				} else if(val.equals("ram")) {
-					initRAMClientCacheFS();
-				} else /*if(val.equals("none")) */{
-					initNoClientCacheFS();
 				}
-				
-				synchronized(Node.this) {
-					clientCacheType = val;
-				}
-			}
 		}
 
 		@Override
@@ -447,26 +466,21 @@ public class Node implements TimeSkewDetectorCallback {
 		}
 	}
 
-	final File dbFile; // FIXME remove
-	final File dbFileCrypt; // FIXME remove
+	private final File dbFile;
+	private final File dbFileCrypt;
+	private boolean defragDatabaseOnStartup;
+	private boolean defragOnce;
 	/** db4o database for node and client layer.
 	 * Other databases can be created for the datastore (since its usage
 	 * patterns and content are completely different), or for plugins (for
-	 * security reasons). FIXME remove. */
+	 * security reasons). */
 	public ObjectContainer db;
-	private volatile boolean hasPanicked;
 	/** A fixed random number which identifies the top-level objects belonging to
 	 * this node, as opposed to any others that might be stored in the same database
-	 * (e.g. because of many-nodes-in-one-VM). FIXME remove when db4o back compaibility is removed. */
+	 * (e.g. because of many-nodes-in-one-VM). */
 	public long nodeDBHandle;
 
-	/** Encryption key for client.dat.crypt or client.dat.bak.crypt (and also the old node.db4o.
-	 * crypt) */
-	private DatabaseKey databaseKey;
-	
-	/** Encryption keys, if loaded, null if waiting for a password. We must be able to write them, 
-	 * and they're all used elsewhere anyway, so there's no point trying not to keep them in memory. */
-	private MasterKeys keys;
+	private boolean autoChangeDatabaseEncryption = true;
 
 	/** Stats */
 	public final NodeStats nodeStats;
@@ -492,12 +506,12 @@ public class Node implements TimeSkewDetectorCallback {
 	// timeout. Most nodes don't need to send keepalives because they are constantly busy,
 	// this is only an issue for disabled darknet connections, very quiet private networks
 	// etc.
-	public static final long KEEPALIVE_INTERVAL = SECONDS.toMillis(7);
+	public static final int KEEPALIVE_INTERVAL = 7000;
 	// If no activity for 30 seconds, node is dead
 	// 35 seconds allows plenty of time for resends etc even if above is 14 sec as it is on older nodes.
-	public static final long MAX_PEER_INACTIVITY = SECONDS.toMillis(35);
+	public static final int MAX_PEER_INACTIVITY = 35000;
 	/** Time after which a handshake is assumed to have failed. */
-	public static final int HANDSHAKE_TIMEOUT = (int) MILLISECONDS.toMillis(4800); // Keep the below within the 30 second assumed timeout.
+	public static final int HANDSHAKE_TIMEOUT = 4800; // Keep the below within the 30 second assumed timeout.
 	// Inter-handshake time must be at least 2x handshake timeout
 	public static final int MIN_TIME_BETWEEN_HANDSHAKE_SENDS = HANDSHAKE_TIMEOUT*2; // 10-20 secs
 	public static final int RANDOMIZED_TIME_BETWEEN_HANDSHAKE_SENDS = HANDSHAKE_TIMEOUT*2; // avoid overlap when the two handshakes are at the same time
@@ -510,10 +524,11 @@ public class Node implements TimeSkewDetectorCallback {
 	public static final int MIN_BURSTING_HANDSHAKE_BURST_SIZE = 1; // 1-4 handshake sends per burst
 	public static final int RANDOMIZED_BURSTING_HANDSHAKE_BURST_SIZE = 3;
 	// If we don't receive any packets at all in this period, from any node, tell the user
-	public static final long ALARM_TIME = MINUTES.toMillis(1);
+	public static final long ALARM_TIME = 60*1000;
 
-	static final long MIN_INTERVAL_BETWEEN_INCOMING_SWAP_REQUESTS = MILLISECONDS.toMillis(900);
-	static final long MIN_INTERVAL_BETWEEN_INCOMING_PROBE_REQUESTS = MILLISECONDS.toMillis(1000);
+	// 900ms
+	static final int MIN_INTERVAL_BETWEEN_INCOMING_SWAP_REQUESTS = 900;
+	static final int MIN_INTERVAL_BETWEEN_INCOMING_PROBE_REQUESTS = 1000;
 	public static final int SYMMETRIC_KEY_LENGTH = 32; // 256 bits - note that this isn't used everywhere to determine it
 
 	/** Datastore directory */
@@ -523,19 +538,6 @@ public class Node implements TimeSkewDetectorCallback {
 	private String storeType;
 	private boolean storeUseSlotFilters;
 	private boolean storeSaltHashResizeOnStart;
-	
-	/** Minimum total datastore size */
-	static final long MIN_STORE_SIZE = 32 * 1024 * 1024;
-	/** Default datastore size (must be at least MIN_STORE_SIZE) */
-	static final long DEFAULT_STORE_SIZE = 32 * 1024 * 1024;
-	/** Minimum client cache size */
-	static final long MIN_CLIENT_CACHE_SIZE = 0;
-	/** Default client cache size (must be at least MIN_CLIENT_CACHE_SIZE) */
-	static final long DEFAULT_CLIENT_CACHE_SIZE = 10 * 1024 * 1024;
-	/** Minimum slashdot cache size */
-	static final long MIN_SLASHDOT_CACHE_SIZE = 0;
-	/** Default slashdot cache size (must be at least MIN_SLASHDOT_CACHE_SIZE) */
-	static final long DEFAULT_SLASHDOT_CACHE_SIZE = 10 * 1024 * 1024;
 
 	/** The number of bytes per key total in all the different datastores. All the datastores
 	 * are always the same size in number of keys. */
@@ -674,6 +676,24 @@ public class Node implements TimeSkewDetectorCallback {
 	private boolean acceptSeedConnections;
 	private boolean passOpennetRefsThroughDarknet;
 
+	// Transport stuff
+	/**
+	 * This object is used to track various transport managers.
+	 * Presently it will contain one for opennet and one for darknet modes.
+	 * We might need it for other modes too.
+	 * NodeCrypto 
+	 */
+	private HashMap<TransportMode, TransportManager> transportManagers;
+	
+	/**
+	 * This will be used for transports functioning inside fred.
+	 * They are not plugins. Used to make existing UDP behave like a plugin. 
+	 * So it will accessed like before "physical.udp".
+	 */
+	public static final String defaultPacketTransportName = "udp";
+	/**This will be used for transports functioning inside fred. They are not plugins*/
+	public static final String defaultStreamTransportName = "tcp";
+	
 	// General stuff
 
 	public final Executor executor;
@@ -1184,6 +1204,7 @@ public class Node implements TimeSkewDetectorCallback {
 		}
 		masterKeysFile = f;
 		FileUtil.setOwnerRW(masterKeysFile);
+
 		
 		nodeConfig.register("showFriendsVisibilityAlert", false, sortOrder++, true, false, "Node.showFriendsVisibilityAlert", "Node.showFriendsVisibilityAlertLong", new BooleanCallback() {
 
@@ -1549,7 +1570,7 @@ public class Node implements TimeSkewDetectorCallback {
 		} catch (InvalidConfigValueException e) {
 			throw new NodeInitException(NodeInitException.EXIT_BAD_BWLIMIT, e.getMessage());
 		}
-
+		outputBandwidthLimit = obwLimit;
 		// Bucket size of 0.5 seconds' worth of bytes.
 		// Add them at a rate determined by the obwLimit.
 		// Maximum forced bytes 80%, in other words, 20% of the bandwidth is reserved for
@@ -2383,7 +2404,7 @@ public class Node implements TimeSkewDetectorCallback {
 
 		long slashdotCacheLifetime = nodeConfig.getLong("slashdotCacheLifetime");
 
-		nodeConfig.register("slashdotCacheSize", DEFAULT_SLASHDOT_CACHE_SIZE, sortOrder++, false, true, "Node.slashdotCacheSize", "Node.slashdotCacheSizeLong",
+		nodeConfig.register("slashdotCacheSize", "10M", sortOrder++, false, true, "Node.slashdotCacheSize", "Node.slashdotCacheSizeLong",
 				new LongCallback() {
 
 					@Override
@@ -2506,7 +2527,7 @@ public class Node implements TimeSkewDetectorCallback {
 		enableRoutedPing = nodeConfig.getBoolean("enableRoutedPing");
 		
 		updateMTU();
-		
+
 		/* Take care that no configuration options are registered after this point; they will not persist
 		 * between restarts.
 		 */
@@ -4771,6 +4792,7 @@ public class Node implements TimeSkewDetectorCallback {
 		if(masterKeysFile.exists()) {
 			keys.changePassword(masterKeysFile, newPassword, secureRandom);
 			setPasswordInner(keys, inFirstTimeWizard);
+			keys.clearAll();
 		} else {
 			setMasterPassword(newPassword, inFirstTimeWizard);
 		}

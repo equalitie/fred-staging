@@ -25,10 +25,8 @@ import java.util.zip.InflaterInputStream;
 import freenet.client.DefaultMIMETypes;
 import freenet.io.comm.DMT;
 import freenet.io.comm.DisconnectedException;
-import freenet.io.comm.FreenetInetAddress;
 import freenet.io.comm.Message;
 import freenet.io.comm.NotConnectedException;
-import freenet.io.comm.Peer;
 import freenet.io.comm.PeerParseException;
 import freenet.io.comm.ReferenceSignatureVerificationException;
 import freenet.io.comm.RetrievalException;
@@ -37,6 +35,7 @@ import freenet.io.xfer.BulkTransmitter;
 import freenet.io.xfer.PartiallyReceivedBulk;
 import freenet.keys.FreenetURI;
 import freenet.l10n.NodeL10n;
+import freenet.node.TransportManager.TransportMode;
 import freenet.node.useralerts.AbstractUserAlert;
 import freenet.node.useralerts.BookmarkFeedUserAlert;
 import freenet.node.useralerts.DownloadFeedUserAlert;
@@ -57,6 +56,8 @@ import freenet.support.io.FileUtil;
 import freenet.support.io.FileRandomAccessBuffer;
 
 public class DarknetPeerNode extends PeerNode {
+	
+	
 
 	/** Name of this node */
 	String myName;
@@ -159,8 +160,8 @@ public class DarknetPeerNode extends PeerNode {
 	 * @param node2 The running Node we are part of.
 	 * @param trust If this is a new node, we will use this parameter to set the initial trust level.
 	 */
-	public DarknetPeerNode(SimpleFieldSet fs, Node node2, NodeCrypto crypto, PeerManager peers, boolean fromLocal, OutgoingPacketMangler mangler, FRIEND_TRUST trust, FRIEND_VISIBILITY visibility2) throws FSParseException, PeerParseException, ReferenceSignatureVerificationException {
-		super(fs, node2, crypto, peers, fromLocal, false, mangler, false);
+	public DarknetPeerNode(SimpleFieldSet fs, Node node2, NodeCrypto crypto, PeerManager peers, boolean fromLocal, FRIEND_TRUST trust, FRIEND_VISIBILITY visibility2) throws FSParseException, PeerParseException, ReferenceSignatureVerificationException {
+		super(fs, node2, crypto, peers, fromLocal, false, false);
 
 		logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
 
@@ -214,28 +215,6 @@ public class DarknetPeerNode extends PeerNode {
 		// Setup the queuedToSendN2NMExtraPeerDataFileNumbers
 		queuedToSendN2NMExtraPeerDataFileNumbers = new LinkedHashSet<Integer>();
 
-	}
-
-	/**
-	 *
-	 * Normally this is the address that packets have been received from from this node.
-	 * However, if ignoreSourcePort is set, we will search for a similar address with a different port
-	 * number in the node reference.
-	 */
-	@Override
-	public synchronized Peer getPeer(){
-		Peer detectedPeer = super.getPeer();
-		if(ignoreSourcePort) {
-			FreenetInetAddress addr = detectedPeer == null ? null : detectedPeer.getFreenetAddress();
-			int port = detectedPeer == null ? -1 : detectedPeer.getPort();
-			if(nominalPeer == null) return detectedPeer;
-			for(Peer p : nominalPeer) {
-				if(p.getPort() != port && p.getFreenetAddress().equals(addr)) {
-					return p;
-				}
-			}
-		}
-		return detectedPeer;
 	}
 
 	/**
@@ -430,19 +409,18 @@ public class DarknetPeerNode extends PeerNode {
 		return super.isBurstOnly();
 	}
 
-	@Override
-	public boolean allowLocalAddresses() {
-		synchronized(this) {
-			if(allowLocalAddresses) return true;
-		}
-		return super.allowLocalAddresses();
-	}
-
 	public void setAllowLocalAddresses(boolean setting) {
 		synchronized(this) {
 			allowLocalAddresses = setting;
 		}
 		node.peers.writePeersDarknetUrgent();
+	}
+	
+	@Override
+	public boolean allowLocalAddress() {
+		synchronized(this) {
+			return allowLocalAddresses;
+		}
 	}
 
 	public boolean readExtraPeerData() {
@@ -1966,5 +1944,10 @@ public class DarknetPeerNode extends PeerNode {
 				// Ignore
 			}
 		}
+	}
+
+	@Override
+	public TransportMode getMode() {
+		return TransportMode.darknet;
 	}
 }
