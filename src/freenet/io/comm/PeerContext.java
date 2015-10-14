@@ -41,6 +41,9 @@ public interface PeerContext {
 	 * address changes then we get a new throttle). */
 	public PacketThrottle getThrottle();
 
+	/** Get the SocketHandler which handles incoming packets from this node */
+	SocketHandler getSocketHandler();
+
 	/** Get a WeakReference to this context. Hopefully there is only one of these for the whole object; they are quite
 	 * expensive. */
 	WeakReference<? extends PeerContext> getWeakRef();

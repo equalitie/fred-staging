@@ -7,6 +7,7 @@ import static java.util.concurrent.TimeUnit.MINUTES;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -14,7 +15,9 @@ import java.util.List;
 import freenet.crypt.BlockCipher;
 import freenet.crypt.HMAC;
 import freenet.crypt.PCFBMode;
+import freenet.io.comm.DMT;
 import freenet.io.comm.Message;
+import freenet.io.comm.Peer;
 import freenet.io.comm.Peer.LocalAddressException;
 import freenet.io.xfer.PacketThrottle;
 import freenet.node.NewPacketFormatKeyContext.AddedAcks;
@@ -23,6 +26,7 @@ import freenet.support.Fields;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.Logger.LogLevel;
+import freenet.support.SparseBitmap;
 import freenet.support.MutableBoolean;
 
 public class NewPacketFormat implements PacketFormat {
@@ -456,15 +460,50 @@ public class NewPacketFormat implements PacketFormat {
 		
 		if(!ackOnly) {
 			
-			while(packet.getLength() < maxPacketSize) {
-				MessageFragment frag = pmt.getMessageFragment(maxPacketSize - packet.getLength(), addStatsBulk, addStatsRT);
-				if(frag == null) break;
-				mustSend = true;
-				addedFragments = true;
-				packet.addMessageFragment(frag);
-				sentPacket.addFragment(frag);
+			boolean addedFragments = false;
+			
+			while(true) {
 				
-				if(addStatsBulk.value && !addedStatsBulk) {
+				boolean addStatsBulk = false;
+				boolean addStatsRT = false;
+				
+				synchronized(sendBufferLock) {
+					// Always finish what we have started before considering sending more packets.
+					// Anything beyond this is beyond the scope of NPF and is PeerMessageQueue's job.
+addOldLoop:			for(int i = 0; i < startedByPrio.size(); i++) {
+						HashMap<Integer, MessageWrapper> started = startedByPrio.get(i);
+						
+						//Try to finish messages that have been started
+						Iterator<MessageWrapper> it = started.values().iterator();
+						while(it.hasNext() && packet.getLength() < maxPacketSize) {
+							MessageWrapper wrapper = it.next();
+							while(packet.getLength() < maxPacketSize) {
+								MessageFragment frag = wrapper.getMessageFragment(maxPacketSize - packet.getLength());
+								if(frag == null) break;
+								mustSend = true;
+								addedFragments = true;
+								packet.addMessageFragment(frag);
+								sentPacket.addFragment(frag);
+								if(wrapper.allSent()) {
+									if((haveAddedStatsBulk == null) && wrapper.getItem().sendLoadBulk) {
+										addStatsBulk = true;
+										// Add the lossy message outside the lock.
+										break addOldLoop;
+									}
+									if((haveAddedStatsRT == null) && wrapper.getItem().sendLoadRT) {
+										addStatsRT = true;
+										// Add the lossy message outside the lock.
+										break addOldLoop;
+									}
+								}
+							}
+						}
+					}
+				}
+				
+				if(!(addStatsBulk || addStatsRT)) break;
+				
+				if(addStatsBulk) {
 					MessageItem item = pn.makeLoadStats(false, false, true);
 					if(item != null) {
 						byte[] buf = item.getData();
@@ -596,41 +635,7 @@ public class NewPacketFormat implements PacketFormat {
 				}
 			}
 			
-			MutableBoolean needsPingMessage = new MutableBoolean(false);
-			if(mustSendKeepalive && packet.noFragments()) {
-				needsPingMessage.value = true;
-			}
-			//Fragment header is max 9 bytes, allow min 1 byte data
-			// FIXME Check above where the 10 is not used and avoid usage of a number 10 without defining it.
-			while((packet.getLength() + 10)< maxPacketSize) {
-				MessageFragment frag = pmt.loadMessageFragments(now, maxPacketSize - packet.getLength(), needsPingMessage, addStatsBulk, addStatsRT);
-				if(frag == null) break;
-				mustSend = true;
-				packet.addMessageFragment(frag);
-				sentPacket.addFragment(frag);
-				
-				if(addStatsBulk.value && !addedStatsBulk) {
-					MessageItem item = pn.makeLoadStats(false, false, true);
-					if(item != null) {
-						byte[] buf = item.getData();
-						haveAddedStatsBulk = buf;
-						// FIXME if this fails, drop some messages.
-						packet.addLossyMessage(buf, maxPacketSize);
-						addedStatsBulk = true;
-					}
-				}
-				
-				if(addStatsRT.value && !addedStatsRT) {
-					MessageItem item = pn.makeLoadStats(true, false, true);
-					if(item != null) {
-						byte[] buf = item.getData();
-						haveAddedStatsRT = buf;
-						// FIXME if this fails, drop some messages.
-						packet.addLossyMessage(buf, maxPacketSize);
-						addedStatsRT = true;
-					}
-				}
-			}
+
 		}
 
 		if(packet.getLength() == 5) return null;

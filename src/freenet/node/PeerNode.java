@@ -116,9 +116,7 @@ import freenet.support.transport.ip.IPUtil;
  * LOCKING: Can hold PeerManager and then lock PeerNode. Cannot hold
  * PeerNode and then lock PeerManager.
  */
-public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode {
-	
-	//public final TransportMode transportMode;
+public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, PeerNodeUnlocked {
 
 	private String lastGoodVersion;
 	/**
@@ -3430,6 +3428,11 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode {
 	
 	public OutgoingStreamMangler getOutgoingMangler(StreamTransportPlugin transportPlugin){
 		return peerStreamTransportMap.get(transportPlugin.transportName).outgoingMangler;
+	}
+
+	@Override
+	public SocketHandler getSocketHandler() {
+		return outgoingMangler.getSocketHandler();
 	}
 
 	/** Is this peer disabled? I.e. has the user explicitly disabled it? */

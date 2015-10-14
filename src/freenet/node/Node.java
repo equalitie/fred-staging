@@ -103,6 +103,7 @@ import freenet.node.NodeDispatcher.NodeDispatcherCallback;
 import freenet.node.OpennetManager.ConnectionType;
 import freenet.node.SecurityLevels.NETWORK_THREAT_LEVEL;
 import freenet.node.SecurityLevels.PHYSICAL_THREAT_LEVEL;
+import freenet.node.TransportManager.TransportMode;
 import freenet.node.probe.Listener;
 import freenet.node.probe.Type;
 import freenet.node.stats.DataStoreInstanceType;
@@ -5040,7 +5041,15 @@ public class Node implements TimeSkewDetectorCallback {
 			return true;
 		return false;
 	}
-
+	
+	public HashMap<TransportMode, TransportManager> getTransports(){
+		return transportManagers;
+	}
+	
+	public TransportManager getTransportManager(TransportMode transportMode){
+		return transportManagers.get(transportMode);
+	}
+	
 
     public byte[] getPluginStoreKey(String storeIdentifier) {
         DatabaseKey key;

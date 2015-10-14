@@ -30,6 +30,7 @@ import freenet.io.comm.NotConnectedException;
 import freenet.io.comm.PeerParseException;
 import freenet.io.comm.ReferenceSignatureVerificationException;
 import freenet.io.comm.RetrievalException;
+import freenet.io.comm.SocketHandler;
 import freenet.io.xfer.BulkReceiver;
 import freenet.io.xfer.BulkTransmitter;
 import freenet.io.xfer.PartiallyReceivedBulk;
@@ -1950,4 +1951,5 @@ public class DarknetPeerNode extends PeerNode {
 	public TransportMode getMode() {
 		return TransportMode.darknet;
 	}
+
 }

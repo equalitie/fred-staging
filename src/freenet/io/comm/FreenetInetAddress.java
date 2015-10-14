@@ -6,6 +6,7 @@ package freenet.io.comm;
 import java.io.DataInput;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 
