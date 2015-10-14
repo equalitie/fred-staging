@@ -211,7 +211,7 @@ public class PeerPacketTransport extends PeerTransport {
 				// Don't reset the uptime if we rekey
 				if(!isTransportConnected) {
 					transportConnectedTime = now;
-					pn.resetCountSelectionsSinceConnected();
+					//pn.resetCountSelectionsSinceConnected();
 					sentInitialMessagesTransport = false;
 				} else
 					wasARekey = true;
@@ -230,7 +230,7 @@ public class PeerPacketTransport extends PeerTransport {
 					Logger.normal(this, "Changed boot ID while rekeying! from " + pn.getBootID() + " to " + thisBootID + " for " + detectedTransportAddress);
 					wasARekey = false;
 					transportConnectedTime = now;
-					pn.resetCountSelectionsSinceConnected();
+					//pn.resetCountSelectionsSinceConnected();
 					sentInitialMessagesTransport = false;
 				} else if(bootIDChanged && logMINOR)
 					Logger.minor(this, "Changed boot ID from " + pn.getBootID() + " to " + thisBootID + " for " + detectedTransportAddress);

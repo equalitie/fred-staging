@@ -104,6 +104,7 @@ public class NewPacketFormatKeyContext {
 	}
 
 	/** One of our outgoing packets has been acknowledged.
+	 * @return False if we have already acked the packet */
 	public void ack(int ack, BasePeerNode pn, SessionKey key) {
 		long rtt;
 		int maxSize;
@@ -133,7 +134,7 @@ public class NewPacketFormatKeyContext {
 		int rt = (int) Math.min(rtt, Integer.MAX_VALUE);
 		pn.reportPing(rt);
 		if(validAck)
-			pn.receivedAck(ackReceived);
+			pn.receivedAck(System.currentTimeMillis(), key.transportPlugin);
 		PacketThrottle throttle = pn.getThrottle();
 		if(throttle == null)
 			return;
@@ -181,24 +182,23 @@ public class NewPacketFormatKeyContext {
 	/** Add as many acks as possible to the packet.
 	 * @return True if there are any old acks i.e. acks that will force us to send a packet
 	 * even if there isn't anything else in it. */
-	public AddedAcks addAcks(NPFPacket packet, int maxPacketSize, long now, boolean useCumulativeAcks) {
+	public AddedAcks addAcks(NPFPacket packet, int maxPacketSize, long now) {
 		boolean mustSend = false;
 		HashMap<Integer, Long> moved = null;
 		int numAcks = 0;
-		packet.setAcknowledgeType(useCumulativeAcks);
 		synchronized(acks) {
 			Iterator<Map.Entry<Integer, Long>> it = acks.entrySet().iterator();
 			while (it.hasNext() && packet.getLength() < maxPacketSize) {
 				Map.Entry<Integer, Long> entry = it.next();
 				int ack = entry.getKey();
 				// All acks must be sent within 200ms.
+				if(entry.getValue() + MAX_ACK_DELAY < now)
+					mustSend = true;
 				if(logDEBUG) Logger.debug(this, "Trying to ack "+ack);
-				if(!packet.addAck(ack)) {
+				if(!packet.addAck(ack, maxPacketSize)) {
 					if(logDEBUG) Logger.debug(this, "Can't add ack "+ack);
 					break;
 				}
-				if(entry.getValue() + MAX_ACK_DELAY < now)
-					mustSend = true;
 				if(moved == null) {
 					// FIXME some more memory efficient representation, since this will normally be very small?
 					moved = new HashMap<Integer, Long>();

@@ -341,7 +341,7 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	* bootID given that we ask for it in the messaging code and so on. This is essentially a "the 
 	* other side restarted" flag, so there isn't really a consistency issue with the rest of 
 	* PeerNode. So it's okay to effectively use a separate lock for it. */
-	private final AtomicLong bootID;
+	private AtomicLong bootID;
 	/** Our boot ID. This is set to a random number on startup, and then reset whenever
 	 * we dump the in-flight messages and call disconnected() on their clients, i.e.
 	 * whenever we call disconnected(true, ...) */
@@ -1847,7 +1847,11 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 	public long getBootID() {
 		return bootID.get();
 	}
-
+	
+	public void setBootID(long bootID) {
+		this.bootID = new AtomicLong(bootID);
+	}
+	
 	private final Object arkFetcherSync = new Object();
 
 	void startARKFetcher() {
@@ -3432,7 +3436,10 @@ public abstract class PeerNode implements USKRetrieverCallback, BasePeerNode, Pe
 
 	@Override
 	public SocketHandler getSocketHandler() {
-		return outgoingMangler.getSocketHandler();
+		//FIXME Used only for logging, fix with returning the actual SocketHandler
+		//return outgoingMangler.getSocketHandler();
+		return new SocketHandler() {
+		};
 	}
 
 	/** Is this peer disabled? I.e. has the user explicitly disabled it? */

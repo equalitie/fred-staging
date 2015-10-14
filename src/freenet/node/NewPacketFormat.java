@@ -340,7 +340,7 @@ public class NewPacketFormat implements PacketFormat {
 		int maxPacketSize = peerTransport.transportPlugin.getMaxPacketSize();
 		NewPacketFormatKeyContext keyContext = sessionKey.packetContext;
 
-		NPFPacket packet = createPacket(maxPacketSize - hmacLength, peerTransport.getMessageQueue(), sessionKey, ackOnly, pn.isUseCumulativeAcksSet());
+		NPFPacket packet = createPacket(maxPacketSize - hmacLength, sessionKey, ackOnly);
 		if(packet == null) return false;
 
 		int paddedLen = packet.getLength() + hmacLength;
@@ -427,7 +427,7 @@ public class NewPacketFormat implements PacketFormat {
 		return true;
 	}
 
-	NPFPacket createPacket(int maxPacketSize, PeerMessageQueue messageQueue, SessionKey sessionKey, boolean ackOnly, boolean useCumulativeAcks) throws BlockedTooLongException {
+	NPFPacket createPacket(int maxPacketSize, SessionKey sessionKey, boolean ackOnly) throws BlockedTooLongException {
 		
 		checkForLostPackets();
 		
@@ -439,7 +439,7 @@ public class NewPacketFormat implements PacketFormat {
 		
 		NewPacketFormatKeyContext keyContext = sessionKey.packetContext;
 		
-		AddedAcks moved = keyContext.addAcks(packet, maxPacketSize, now, useCumulativeAcks);
+		AddedAcks moved = keyContext.addAcks(packet, maxPacketSize, now);
 		if(moved != null && moved.anyUrgentAcks) {
 			if(logDEBUG) Logger.debug(this, "Must send because urgent acks");
 			mustSend = true;
@@ -458,52 +458,23 @@ public class NewPacketFormat implements PacketFormat {
 		byte[] haveAddedStatsBulk = null;
 		byte[] haveAddedStatsRT = null;
 		
+		boolean addedFragments = false;
+		MutableBoolean addStatsBulk = new MutableBoolean();
+		MutableBoolean addStatsRT = new MutableBoolean();
+		boolean addedStatsBulk = addStatsBulk.value = false;
+		boolean addedStatsRT = addStatsRT.value = false;
+		
 		if(!ackOnly) {
 			
-			boolean addedFragments = false;
-			
-			while(true) {
+			while(packet.getLength() < maxPacketSize) {
+				MessageFragment frag = pmt.getMessageFragment(maxPacketSize - packet.getLength(), addStatsBulk, addStatsRT);
+				if(frag == null) break;
+				mustSend = true;
+				addedFragments = true;
+				packet.addMessageFragment(frag);
+				sentPacket.addFragment(frag);
 				
-				boolean addStatsBulk = false;
-				boolean addStatsRT = false;
-				
-				synchronized(sendBufferLock) {
-					// Always finish what we have started before considering sending more packets.
-					// Anything beyond this is beyond the scope of NPF and is PeerMessageQueue's job.
-addOldLoop:			for(int i = 0; i < startedByPrio.size(); i++) {
-						HashMap<Integer, MessageWrapper> started = startedByPrio.get(i);
-						
-						//Try to finish messages that have been started
-						Iterator<MessageWrapper> it = started.values().iterator();
-						while(it.hasNext() && packet.getLength() < maxPacketSize) {
-							MessageWrapper wrapper = it.next();
-							while(packet.getLength() < maxPacketSize) {
-								MessageFragment frag = wrapper.getMessageFragment(maxPacketSize - packet.getLength());
-								if(frag == null) break;
-								mustSend = true;
-								addedFragments = true;
-								packet.addMessageFragment(frag);
-								sentPacket.addFragment(frag);
-								if(wrapper.allSent()) {
-									if((haveAddedStatsBulk == null) && wrapper.getItem().sendLoadBulk) {
-										addStatsBulk = true;
-										// Add the lossy message outside the lock.
-										break addOldLoop;
-									}
-									if((haveAddedStatsRT == null) && wrapper.getItem().sendLoadRT) {
-										addStatsRT = true;
-										// Add the lossy message outside the lock.
-										break addOldLoop;
-									}
-								}
-							}
-						}
-					}
-				}
-				
-				if(!(addStatsBulk || addStatsRT)) break;
-				
-				if(addStatsBulk) {
+				if(addStatsBulk.value && !addedStatsBulk) {
 					MessageItem item = pn.makeLoadStats(false, false, true);
 					if(item != null) {
 						byte[] buf = item.getData();
@@ -721,9 +692,11 @@ addOldLoop:			for(int i = 0; i < startedByPrio.size(); i++) {
 	}
 
 	@Override
-	public void onDisconnect() {
+	public List<MessageItem> onDisconnect() {
 		// Have something specific to this transport.
 		// Previous code has been moved to PeerMessageTracker
+		//FIXME Need to return something here?
+		return new ArrayList<MessageItem>();
 	}
 	
 	/** When do we need to send a packet?
@@ -840,47 +813,7 @@ addOldLoop:			for(int i = 0; i < startedByPrio.size(); i++) {
 					Logger.debug(this, "Acknowledging "+range[0]+" to "+range[1]+" on "+wrapper.getMessageID());
 
 				if(wrapper.ack(range[0], range[1], npf.pn)) {
-					HashMap<Integer, MessageWrapper> started = npf.startedByPrio.get(wrapper.getPriority());
-					MessageWrapper removed = null;
-					synchronized(npf.sendBufferLock) {
-						removed = started.remove(wrapper.getMessageID());
-						if(removed != null) {
-							int size = wrapper.getLength();
-							npf.sendBufferUsed -= size;
-							if(logDEBUG) Logger.debug(this, "Removed " + size + " from remote buffer. Total is now " + npf.sendBufferUsed);
-						}
-					}
-					if(removed == null && logMINOR) {
-						// ack() can return true more than once, it just only calls the callbacks once.
-						Logger.minor(this, "Completed message "+wrapper.getMessageID()+" but it is not in the map from "+wrapper);
-					}
-
-					if(removed != null) {
-						if(logDEBUG) Logger.debug(this, "Completed message "+wrapper.getMessageID()+" from "+wrapper);
-
-						boolean couldSend = npf.canSend(key);
-						int id = wrapper.getMessageID();
-						synchronized(npf) {
-							npf.ackedMessages.add(id, id);
-
-							int oldWindow = npf.messageWindowPtrAcked;
-							while(npf.ackedMessages.contains(npf.messageWindowPtrAcked, npf.messageWindowPtrAcked)) {
-								npf.messageWindowPtrAcked++;
-								if(npf.messageWindowPtrAcked == NUM_MESSAGE_IDS) npf.messageWindowPtrAcked = 0;
-							}
-
-							if(npf.messageWindowPtrAcked < oldWindow) {
-								npf.ackedMessages.remove(oldWindow, NUM_MESSAGE_IDS - 1);
-								npf.ackedMessages.remove(0, npf.messageWindowPtrAcked);
-							} else {
-								npf.ackedMessages.remove(oldWindow, npf.messageWindowPtrAcked);
-							}
-						}
-						if(!couldSend && npf.canSend(key)) {
-							//We aren't blocked anymore, notify packet sender
-							npf.pn.wakeUpSender();
-						}
-					}
+					pmt.acked(wrapper, npf);
 				}
 			}
 
