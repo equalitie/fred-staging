@@ -1,3 +1,4 @@
+
 /* This code is part of Freenet. It is distributed under the GNU General
  * Public License, version 2 (or at your option any later version). See
  * http://www.gnu.org/ for further details of the GPL. */
@@ -196,11 +197,8 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		fullHeadersLengthOneMessage = HEADERS_LENGTH_ONE_MESSAGE + sock.getHeadersLength();
 	}
 
-	/**
-	 * Start up the FNPPacketMangler. By the time this is called, all objects will have been constructed,
-	 * but not all will have been started yet.
-	 */
-	public void start() {
+	@Override
+	public void startMangler() {
 		// Run it directly so that the transient key is set.
 		maybeResetTransientKey();
 		// Fill the DH FIFO on-thread
@@ -2271,7 +2269,17 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 	}
 
 	@Override
+	public int fullHeadersLengthOneMessage() {
+		return fullHeadersLengthOneMessage;
+	}
+
+	@Override
 	public SocketHandler getSocketHandler() {
+		return sock;
+	}
+	
+	@Override
+	public PacketTransportPlugin getTransport() {
 		return sock;
 	}
 
@@ -2641,23 +2649,5 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 	        return 8;
 	    else
 	        return 16;
-	}
-
-	@Override
-	public void startMangler() {
-		// TODO Auto-generated method stub
-		
-	}
-
-	@Override
-	public int fullHeadersLengthOneMessage() {
-		// TODO Auto-generated method stub
-		return 0;
-	}
-
-	@Override
-	public PacketTransportPlugin getTransport() {
-		// TODO Auto-generated method stub
-		return null;
 	}
 }
