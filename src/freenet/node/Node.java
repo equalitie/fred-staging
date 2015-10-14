@@ -1499,6 +1499,22 @@ public class Node implements TimeSkewDetectorCallback {
 		});
 		enablePacketCoalescing = nodeConfig.getBoolean("enablePacketCoalescing");
 
+		/*
+		 * Initialise two transport Managers. Even if opennet is not enabled.
+		 * This allows the plugin to register for opennet even though opennet is not enabled
+		 * FIXME Finish the config classes.
+		 */
+		TransportManagerConfig darknetTransportManagerConfig = new TransportManagerConfig(TransportMode.darknet);
+		TransportManagerConfig opennetTransportManagerConfig = new TransportManagerConfig(TransportMode.opennet);
+		
+		TransportManager darknetTransportManager = new TransportManager(this, darknetTransportManagerConfig);
+		TransportManager opennetTransportManager = new TransportManager(this, opennetTransportManagerConfig);
+		
+		transportManagers = new HashMap<TransportMode, TransportManager> ();
+		
+		transportManagers.put(darknetTransportManager.transportMode, darknetTransportManager);
+		transportManagers.put(opennetTransportManager.transportMode, opennetTransportManager);
+		
 		// Determine the port number
 		// @see #191
 		if(oldConfig != null && "-1".equals(oldConfig.get("node.listenPort")))
