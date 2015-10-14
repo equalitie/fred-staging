@@ -12,16 +12,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 
-import freenet.clients.http.ExternalLinkToadlet;
 import freenet.l10n.NodeL10n;
-import freenet.node.useralerts.AbstractUserAlert;
-import freenet.node.useralerts.UserAlert;
 import freenet.pluginmanager.PluginAddress;
-import freenet.support.HTMLNode;
 import freenet.support.LogThresholdCallback;
 import freenet.support.Logger;
 import freenet.support.Logger.LogLevel;
-import freenet.support.OOMHandler;
 import freenet.support.TimeUtil;
 import freenet.support.io.NativeThread;
 import freenet.support.math.MersenneTwister;
@@ -164,7 +159,7 @@ public class PacketSender implements Runnable {
 		long nextActionTime = Long.MAX_VALUE;
 		long oldTempNow = now;
 
-		final boolean canSendThrottled;
+		boolean canSendThrottled;
 
 		int MAX_PACKET_SIZE = node.darknetCrypto.socket.getMaxPacketSize();
 		long count = node.outputThrottle.getCount();
@@ -228,7 +223,7 @@ public class PacketSender implements Runnable {
 				if(now - pn.lastReceivedDataPacketTime() > pn.maxTimeBetweenReceivedPackets()) {
 					Logger.normal(this, "Disconnecting from " + pn + " - haven't received packets recently");
 					// Hopefully this is a transient network glitch, but stuff will have already started to timeout, so lets dump the pending messages.
-					pn.disconnected(true, false);
+					pn.disconnectPeer(true, false);
 					continue;
 				} else if(now - pn.lastReceivedAckTime() > pn.maxTimeBetweenReceivedAcks() && !pn.isDisconnecting()) {
 					// FIXME better to disconnect immediately??? Or check canSend()???
@@ -353,8 +348,11 @@ public class PacketSender implements Runnable {
 					if(handshakeTime <= lowestHandshakeTime)
 						handshakePeerTransports.add(peerTransport);
 				}
-				if(handshakeTime <= lowestHandshakeTime)
-					handshakePeers.add(pn);
+				
+				long tempNow = System.currentTimeMillis();
+				if((tempNow - oldTempNow) > (5 * 1000))
+					Logger.error(this, "tempNow is more than 5 seconds past oldTempNow (" + (tempNow - oldTempNow) + ") in PacketSender working with " + pn.userToString());
+				oldTempNow = tempNow;
 			}
 			
 			// If we have no contacts from any transport then we start the ARK fetcher.
@@ -427,7 +425,7 @@ public class PacketSender implements Runnable {
                     nextActionTime = now;
 				}
 			} catch (BlockedTooLongException e) {
-				Logger.error(this, "Waited too long: "+TimeUtil.formatTime(e.delta)+" to allocate a packet number to send to "+toSendAckOnly+" : "+("(new packet format)")+" (version "+toSendAckOnly.getVersionNumber()+") - DISCONNECTING!");
+				Logger.error(this, "Waited too long: "+TimeUtil.formatTime(e.delta)+" to allocate a packet number to send to "+toSendAckOnly+" : (new packet format)"+" (version "+toSendAckOnly.pn.getVersionNumber()+") - DISCONNECTING!");
 				toSendAckOnly.disconnectTransport(true);
 			}
 		}
@@ -475,14 +473,13 @@ public class PacketSender implements Runnable {
 		if(om != null && node.getUptime() > SECONDS.toMillis(30)) {
 			OpennetPeerNode[] peers = om.getOldPeers();
 
-			for(OpennetPeerNode pn : peers) {
-				long lastConnected = pn.timeLastConnected(now);
-				if(lastConnected <= 0)
+			for(PeerNode pn : peers) {
+				if(pn.timeLastConnected(System.currentTimeMillis()) <= 0)
 					Logger.error(this, "Last connected is zero or negative for old-opennet-peer "+pn);
 				// Will be removed by next line.
-				if(now - lastConnected > OpennetManager.MAX_TIME_ON_OLD_OPENNET_PEERS) {
+				if(now - pn.timeLastConnected(System.currentTimeMillis()) > OpennetManager.MAX_TIME_ON_OLD_OPENNET_PEERS) {
 					om.purgeOldOpennetPeer(pn);
-					if(logMINOR) Logger.minor(this, "Removing old opennet peer (too old): "+pn+" age is "+TimeUtil.formatTime(now - lastConnected));
+					if(logMINOR) Logger.minor(this, "Removing old opennet peer (too old): "+pn+" age is "+TimeUtil.formatTime(now - pn.timeLastConnected(System.currentTimeMillis())));
 					continue;
 				}
 				if(pn.isConnected()) continue; // Race condition??
