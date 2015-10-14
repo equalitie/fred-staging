@@ -1,5 +1,7 @@
 package freenet.node;
 
+import java.util.List;
+
 import freenet.pluginmanager.PluginAddress;
 
 public interface PacketFormat {
@@ -23,7 +25,7 @@ public interface PacketFormat {
 	 * Called when the peer has been disconnected.
 	 * THE CALLER SHOULD STOP USING THE PACKET FORMAT OBJECT AFTER CALLING THIS FUNCTION!
 	 */
-	void onDisconnect();
+	List<MessageItem> onDisconnect();
 
 	/**
 	 * Returns {@code false} if the packet format can't send new messages because it must wait for some internal event.
