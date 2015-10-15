@@ -199,11 +199,7 @@ public class PacketSender implements Runnable {
 			
 			// Basic peer maintenance.
 			
-			// For purposes of detecting not having received anything, which indicates a 
-			// serious connectivity problem, we want to look for *any* packets received, 
-			// including auth packets.
-			lastReceivedPacketFromAnyNode =
-				Math.max(pn.lastReceivedPacketTime(), lastReceivedPacketFromAnyNode);
+
 			pn.maybeOnConnect();
 			if(pn.shouldDisconnectAndRemoveNow() && !pn.isDisconnecting()) {
 				// Might as well do it properly.
@@ -214,26 +210,7 @@ public class PacketSender implements Runnable {
 			
 			if(pn.isConnected()) {
 				
-				boolean shouldThrottle = pn.shouldThrottle();
-				
-				pn.checkForLostPackets();
-
-				// Is the node dead?
-				// It might be disconnected in terms of FNP but trying to reconnect via JFK's, so we need to use the time when we last got a *data* packet.
-				if(now - pn.lastReceivedDataPacketTime() > pn.maxTimeBetweenReceivedPackets()) {
-					Logger.normal(this, "Disconnecting from " + pn + " - haven't received packets recently");
-					// Hopefully this is a transient network glitch, but stuff will have already started to timeout, so lets dump the pending messages.
-					pn.disconnectPeer(true, false);
-					continue;
-				} else if(now - pn.lastReceivedAckTime() > pn.maxTimeBetweenReceivedAcks() && !pn.isDisconnecting()) {
-					// FIXME better to disconnect immediately??? Or check canSend()???
-					Logger.normal(this, "Disconnecting from " + pn + " - haven't received acks recently");
-					// Do it properly.
-					// There appears to be connectivity from them to us but not from us to them.
-					// So it is helpful for them to know that we are disconnecting.
-					node.peers.disconnect(pn, true, true, false, true, false, SECONDS.toMillis(5));
-					continue;
-				} else if(pn.isRoutable() && pn.noLongerRoutable()) {
+				if(pn.isRoutable() && pn.noLongerRoutable()) {
 					/*
 					 NOTE: Whereas isRoutable() && noLongerRoutable() are generally mutually exclusive, this
 					 code will only execute because of the scheduled-runnable in start() which executes
@@ -421,12 +398,32 @@ public class PacketSender implements Runnable {
 		} else if(toSendAckOnly != null) {
 			try {
 				if(toSendAckOnly.maybeSendPacket(now, true)) {
-                    // Round-robin over the loop to update nextActionTime appropriately
-                    nextActionTime = now;
+					count = node.outputThrottle.getCount();
+					if(count > MAX_PACKET_SIZE)
+						canSendThrottled = true;
+					else {
+						canSendThrottled = false;
+						long canSendAt = node.outputThrottle.getNanosPerTick() * (MAX_PACKET_SIZE - count);
+						canSendAt = (canSendAt + 1000*1000 - 1) / (1000*1000);
+						if(logMINOR)
+							Logger.minor(this, "Can send throttled packets in "+canSendAt+"ms");
+						nextActionTime = Math.min(nextActionTime, now + canSendAt);
+					}
 				}
 			} catch (BlockedTooLongException e) {
 				Logger.error(this, "Waited too long: "+TimeUtil.formatTime(e.delta)+" to allocate a packet number to send to "+toSendAckOnly+" : (new packet format)"+" (version "+toSendAckOnly.pn.getVersionNumber()+") - DISCONNECTING!");
 				toSendAckOnly.disconnectTransport(true);
+				onForceDisconnectBlockTooLong(toSendAckOnly, e);
+			}
+
+			if(canSendThrottled || !toSendAckOnly.shouldThrottle()) {
+				long urgentTime = toSendAckOnly.getNextUrgentTime(now);
+				// Should spam the logs, unless there is a deadlock
+				if(urgentTime < Long.MAX_VALUE && logMINOR)
+					Logger.minor(this, "Next urgent time: " + urgentTime + "(in "+(urgentTime - now)+") for " + toSendAckOnly);
+				nextActionTime = Math.min(nextActionTime, urgentTime);
+			} else {
+				nextActionTime = Math.min(nextActionTime, toSendAckOnly.timeCheckForLostPackets());
 			}
 		}
 		

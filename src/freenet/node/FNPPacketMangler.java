@@ -1,4 +1,3 @@
-
 /* This code is part of Freenet. It is distributed under the GNU General
  * Public License, version 2 (or at your option any later version). See
  * http://www.gnu.org/ for further details of the GPL. */
@@ -51,6 +50,7 @@ import freenet.io.comm.ReferenceSignatureVerificationException;
 import freenet.io.comm.SocketHandler;
 import freenet.l10n.NodeL10n;
 import freenet.node.OpennetManager.ConnectionType;
+import freenet.node.useralerts.UserAlert;
 import freenet.pluginmanager.MalformedPluginAddressException;
 import freenet.pluginmanager.PacketTransportPlugin;
 import freenet.pluginmanager.PluginAddress;
@@ -82,16 +82,6 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
     static { Logger.registerClass(FNPPacketMangler.class); }
 	private static volatile boolean logMINOR;
 	private static volatile boolean logDEBUG;
-
-	static {
-		Logger.registerLogThresholdCallback(new LogThresholdCallback() {
-			@Override
-			public void shouldUpdate() {
-				logMINOR = Logger.shouldLog(LogLevel.MINOR, this);
-				logDEBUG = Logger.shouldLog(LogLevel.DEBUG, this);
-			}
-		});
-	}
 
 	private final Node node;
 	private final NodeCrypto crypto;
@@ -179,13 +169,12 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 	/** Headers overhead if there is one message and no acks. */
 	static public final int HEADERS_LENGTH_ONE_MESSAGE =
 		HEADERS_LENGTH_MINIMUM + 2; // 2 bytes = length of message. rest is the same.
-	
+
 	final int fullHeadersLengthMinimum;
 	final int fullHeadersLengthOneMessage;
-
-    private long lastConnectivityStatusUpdate;
-    private Status lastConnectivityStatus;
-
+        
+        private long lastConnectivityStatusUpdate;
+        private Status lastConnectivityStatus;
 
 	public FNPPacketMangler(Node node, NodeCrypto crypt, PacketTransportPlugin sock) {
 		this.node = node;
@@ -586,12 +575,21 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		// We are the RESPONDER.
 		// Therefore, we can only get packets of phase 1 and 3 here.
 
-		if(packetType == 0) {
-			// Phase 1
-			processJFKMessage1(payload,4,null,replyTo, true, setupType, negType);
-		} else if(packetType == 2) {
-			// Phase 3
-			processJFKMessage3(payload, 4, null, replyTo, false, true, setupType, negType);
+		if(packetType == 0 || packetType == 2) {
+			this.authHandlingThread.execute(new Runnable() {
+
+				@Override
+				public void run() {
+					if(packetType == 0) {
+						// Phase 1
+						processJFKMessage1(payload,4,null,replyTo, true, setupType, negType);
+					} else if(packetType == 2) {
+						// Phase 3
+						processJFKMessage3(payload, 4, null, replyTo, false, true, setupType, negType);
+					}
+				}
+				
+			});
 		} else {
 			Logger.error(this, "Invalid phase "+packetType+" for anonymous-initiator (we are the responder) from "+replyTo);
 		}
@@ -1247,7 +1245,7 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 
 		// We *WANT* to check the hmac before we do the lookup on the hashmap
 		// @see https://bugs.freenetproject.org/view.php?id=1604
-		if(!HMAC.verifyWithSHA256(getTransientKey(), assembleJFKAuthenticator(responderExponential, initiatorExponential, nonceResponder, nonceInitiator, replyTo.getPhysicalAddress().getBytes()) , authenticator)) {
+		if(!HMAC.verifyWithSHA256(getTransientKey(), assembleJFKAuthenticator(responderExponential, initiatorExponential, nonceResponder, nonceInitiatorHashed, replyTo.getPhysicalAddress().getBytes()) , authenticator)) {
 			if(shouldLogErrorInHandshake(t1)) {
 			    if(logDEBUG) Logger.debug(this, "We received the following HMAC : " + HexUtil.bytesToHex(authenticator));
 			    if(logDEBUG) Logger.debug(this, "We have Ni' : " + HexUtil.bytesToHex(nonceInitiatorHashed));
@@ -1404,14 +1402,14 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		}
 
 		// verify the signature
-		byte[] toVerify = assembleDHParams(nonceInitiatorHashed, nonceResponder, initiatorExponential, responderExponential, crypto.getIdentity(negType, false), data);
+		byte[] toVerify = assembleDHParams(nonceInitiatorHashed, nonceResponder, initiatorExponential, responderExponential, crypto.myIdentity, data);
 		if(negType < 9) {
 		    byte[] r = new byte[Node.SIGNATURE_PARAMETER_LENGTH];
 		    System.arraycopy(sig, 0, r, 0, Node.SIGNATURE_PARAMETER_LENGTH);
             byte[] s = new byte[Node.SIGNATURE_PARAMETER_LENGTH];
             System.arraycopy(sig, Node.SIGNATURE_PARAMETER_LENGTH, s, 0, Node.SIGNATURE_PARAMETER_LENGTH);
 		    DSASignature remoteSignature = new DSASignature(new NativeBigInteger(1,r), new NativeBigInteger(1,s));
-		    if(!DSA.verify(peerTransport.pn.peerPubKey, remoteSignature, new NativeBigInteger(1, SHA256.digest(toVerify)), false)) {
+		    if(!DSA.verify(pn.peerPubKey, remoteSignature, new NativeBigInteger(1, SHA256.digest(toVerify)), false)) {
 		        Logger.error(this, "The signature verification has failed!! JFK(3) - "+peerTransport.getAddress());
 		        return;
 		    }
@@ -1562,12 +1560,12 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 	private boolean processJFKMessage4(byte[] payload, int inputOffset, PeerPacketTransport peerTransport, PluginAddress replyTo, boolean oldOpennetPeer, boolean unknownInitiator, int setupType, int negType)	{
 		PeerNode pn = peerTransport.pn;
 		final long t1 = System.currentTimeMillis();
-		int signLength = getSignatureLength(negType);
 		int modulusLength = getModulusLength(negType);
+		int signLength = getSignatureLength(negType);
 		if(logMINOR) Logger.minor(this, "Got a JFK(4) message, processing it - "+peerTransport.getAddress());
-		if(peerTransport.jfkMyRef == null) {
+		if(pn.jfkMyRef == null) {
 			String error = "Got a JFK(4) message but no pn.jfkMyRef for "+peerTransport;
-			if(node.getUptime() < 60*1000) {
+			if(node.getUptime() < SECONDS.toMillis(60)) {
 				Logger.minor(this, error);
 			} else {
 				Logger.error(this, error);
@@ -1635,10 +1633,6 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		 * Signature-r,s
 		 * bootID, znoderef
 		 */
-		byte[] r = Arrays.copyOfRange(decypheredPayload, decypheredPayloadOffset, decypheredPayloadOffset+Node.SIGNATURE_PARAMETER_LENGTH);
-		decypheredPayloadOffset += Node.SIGNATURE_PARAMETER_LENGTH;
-		byte[] s = Arrays.copyOfRange(decypheredPayload, decypheredPayloadOffset, decypheredPayloadOffset+Node.SIGNATURE_PARAMETER_LENGTH);
-		decypheredPayloadOffset += Node.SIGNATURE_PARAMETER_LENGTH;
         byte[] sig = new byte[signLength];
         System.arraycopy(decypheredPayload, decypheredPayloadOffset, sig, 0, signLength);
         decypheredPayloadOffset += signLength;
@@ -1655,12 +1649,11 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		byte[] hisRef = Arrays.copyOfRange(data, ptr, data.length);
 
 		// verify the signature
-		DSASignature remoteSignature = new DSASignature(new NativeBigInteger(1,r), new NativeBigInteger(1,s));
 		int dataLen = hisRef.length + 8 + 9;
 		int nonceSize = getNonceSize(negType);
 		int nonceSizeHashed = (negType > 8 ? HASH_LENGTH : nonceSize);
 	    byte[] identity = crypto.getIdentity(negType, unknownInitiator);
-		byte[] locallyGeneratedText = new byte[nonceSizeHashed + nonceSize + modulusLength * 2 + identity.length + dataLen + pn.jfkMyRef.length];
+		byte[] locallyGeneratedText = new byte[nonceSizeHashed + nonceSize + modulusLength * 2 + crypto.myIdentity.length + dataLen + peerTransport.jfkMyRef.length];
 		int bufferOffset = nonceSizeHashed + nonceSize + modulusLength*2;
 		System.arraycopy(jfkBuffer, 0, locallyGeneratedText, 0, bufferOffset);
 		System.arraycopy(identity, 0, locallyGeneratedText, bufferOffset, identity.length);
@@ -1669,12 +1662,24 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		System.arraycopy(data, 0, locallyGeneratedText, bufferOffset, dataLen);
 		bufferOffset += dataLen;
 		System.arraycopy(peerTransport.jfkMyRef, 0, locallyGeneratedText, bufferOffset, peerTransport.jfkMyRef.length);
-		byte[] messageHash = SHA256.digest(locallyGeneratedText);
-		if(!DSA.verify(peerTransport.pn.peerPubKey, remoteSignature, new NativeBigInteger(1, messageHash), false)) {
-			String error = "The signature verification has failed!! JFK(4) -"+peerTransport.getAddress()+" message hash "+HexUtil.bytesToHex(messageHash)+" length "+locallyGeneratedText.length+" hisRef "+hisRef.length+" hash "+Fields.hashCode(hisRef)+" myRef "+peerTransport.jfkMyRef.length+" hash "+Fields.hashCode(peerTransport.jfkMyRef)+" boot ID "+bootID;
-			Logger.error(this, error);
-			return true;
-		}
+	    if(negType < 9) { // DSA sig     
+	        byte[] r = new byte[Node.SIGNATURE_PARAMETER_LENGTH];
+	        System.arraycopy(sig, 0, r, 0, Node.SIGNATURE_PARAMETER_LENGTH);
+	        byte[] s = new byte[Node.SIGNATURE_PARAMETER_LENGTH];
+	        System.arraycopy(sig, Node.SIGNATURE_PARAMETER_LENGTH, s, 0, Node.SIGNATURE_PARAMETER_LENGTH);
+	        DSASignature remoteSignature = new DSASignature(new NativeBigInteger(1,r), new NativeBigInteger(1,s));
+	        byte[] messageHash = SHA256.digest(locallyGeneratedText);
+	        if(!DSA.verify(pn.peerPubKey, remoteSignature, new NativeBigInteger(1, messageHash), false)) {
+	            String error = "The signature verification has failed!! JFK(4) -"+peerTransport.getAddress()+" message hash "+HexUtil.bytesToHex(messageHash)+" length "+locallyGeneratedText.length+" hisRef "+hisRef.length+" hash "+Fields.hashCode(hisRef)+" myRef "+peerTransport.jfkMyRef.length+" hash "+Fields.hashCode(peerTransport.jfkMyRef)+" boot ID "+bootID;
+	            Logger.error(this, error);
+	            return true;
+	        }
+	    } else { // ECDSA sig
+	        if(!ECDSA.verify(Curves.P256, peerTransport.pn.peerECDSAPubKey(), sig, locallyGeneratedText)) {
+	            Logger.error(this, "The ECDSA signature verification has failed!! JFK(4) - "+pn.getPeer()+" length "+locallyGeneratedText.length+" hisRef "+hisRef.length+" hash "+Fields.hashCode(hisRef)+" myRef "+peerTransport.jfkMyRef.length+" hash "+Fields.hashCode(peerTransport.jfkMyRef)+" boot ID "+bootID);
+	            return true;
+	        }
+	    }
 
 		// Received a packet
 		peerTransport.receivedPacket(true, false);
@@ -2263,6 +2268,8 @@ public class FNPPacketMangler implements OutgoingPacketMangler {
 		if(context == null) return false;
 		return !context.isConnected();
 	}
+	
+	static UserAlert BCPROV_LOAD_FAILED = null;
 
 	public static int[] supportedNegTypes(boolean forPublic) {
 		return new int[] { 9, 10 };
